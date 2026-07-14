@@ -1,4 +1,4 @@
-# Enterprise Document Local RAG Agent
+<img width="2480" height="1350" alt="image" src="https://github.com/user-attachments/assets/92363b93-f29c-4ecc-9b84-b3854ce80094" /># Enterprise Document Local RAG Agent
 
 本地优先的企业文档检索与引用问答应用。支持 PDF、DOCX、XLS/XLSX、TXT、Markdown 和 ZIP，可返回文件、页码、章节与原文引用。
 
@@ -19,6 +19,9 @@
 - 文件、页码、章节、引用片段定位；
 - 单进程、CPU 默认、本地持久化。
 
+## 网页展示
+<img width="2480" height="1350" alt="image" src="https://github.com/user-attachments/assets/2e74e01e-22fc-4893-9c4c-94d02d022aeb" />
+  
 ## 源码启动
 
 要求 Python 3.11 或 3.12。
