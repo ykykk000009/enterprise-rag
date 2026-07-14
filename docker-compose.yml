@@ -1,0 +1,17 @@
+services:
+  rag-agent:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:///./data/agent.db
+      QDRANT_PATH: /app/data/qdrant
+      AUTHORIZED_ROOTS: /app/knowledge
+      HUGGINGFACE_HOME: /models/huggingface
+    volumes:
+      - ./data:/app/data
+      - ./knowledge:/app/knowledge:ro
+      - ./models:/models/huggingface

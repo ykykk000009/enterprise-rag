@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>企业文档智能检索</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f7f9fd;
+      --surface: #ffffff;
+      --surface-soft: #f9fbff;
+      --text: #17233b;
+      --muted: #71809a;
+      --line: #e3eaf5;
+      --blue: #2563eb;
+      --blue-strong: #1d4ed8;
+      --blue-soft: #edf4ff;
+      --green: #15966a;
+      --green-soft: #effaf5;
+      --red: #e5484d;
+      --red-soft: #fff3f4;
+      --amber: #d97706;
+      --amber-soft: #fff8ed;
+      --shadow: 0 8px 24px rgba(31, 55, 96, .05);
+      font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --page: #111827;
+      --surface: #182235;
+      --surface-soft: #1d2a40;
+      --text: #edf3ff;
+      --muted: #9caec8;
+      --line: #2a3a56;
+      --blue: #5b91ff;
+      --blue-strong: #7ba7ff;
+      --blue-soft: #1b3159;
+      --green: #4fc69a;
+      --green-soft: #173c35;
+      --red: #ff7980;
+      --red-soft: #482832;
+      --amber: #f6aa48;
+      --amber-soft: #45351f;
+      --shadow: none;
+    }
+
+    * { box-sizing: border-box; }
+    body { min-width: 320px; margin: 0; color: var(--text); background: var(--page); }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: wait; opacity: .62; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 0 40px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      backdrop-filter: blur(16px);
+    }
+
+    .brand { display: flex; align-items: baseline; gap: 26px; min-width: 0; }
+    .brand-name { font-size: 21px; font-weight: 800; letter-spacing: 0; white-space: nowrap; }
+    .brand-tagline { color: var(--muted); font-size: 14px; font-weight: 600; white-space: nowrap; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .health { display: inline-flex; align-items: center; gap: 7px; margin-left: 8px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 15%, transparent); }
+    .health.is-ready .health-dot { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 15%, transparent); }
+    .health.is-error .health-dot { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 15%, transparent); }
+
+    main { width: min(100%, 1600px); margin: 0 auto; padding: 18px 48px 48px; }
+    .workspace-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(460px, 1fr); gap: 16px; }
+    .panel { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); padding: 20px; }
+    .panel + .panel, .workspace-grid + .panel { margin-top: 16px; }
+    .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .panel-heading h2 { margin: 0; font-size: 17px; font-weight: 800; letter-spacing: 0; }
+    .panel-heading h2 .heading-symbol { margin-right: 8px; color: var(--blue); font-size: 20px; vertical-align: -1px; }
+    .field-label { display: block; margin-bottom: 7px; color: #60708a; font-size: 13px; font-weight: 650; }
+    :root[data-theme="dark"] .field-label { color: var(--muted); }
+
+    form { display: grid; gap: 12px; }
+    label { display: block; min-width: 0; }
+    input, select, textarea {
+      width: 100%; min-width: 0; border: 1px solid #d7e1ef; border-radius: 7px; outline: none;
+      padding: 10px 12px; color: var(--text); background: var(--surface); transition: border-color .15s, box-shadow .15s;
+    }
+    :root[data-theme="dark"] input, :root[data-theme="dark"] select, :root[data-theme="dark"] textarea { border-color: var(--line); background: var(--surface-soft); }
+    input::placeholder, textarea::placeholder { color: #a5b1c3; }
+    input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 14%, transparent); }
+    textarea { min-height: 68px; resize: vertical; line-height: 1.55; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .selection-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+
+    .button, .icon-button {
+      min-height: 38px; border: 1px solid transparent; border-radius: 7px; color: #fff; background: var(--blue); font-weight: 700; transition: transform .12s, background .15s, border-color .15s;
+    }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 0 14px; }
+    .button:hover { background: var(--blue-strong); }
+    .button:active, .icon-button:active { transform: translateY(1px); }
+    .button.primary-wide { width: 100%; }
+    .button.secondary { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 60%, var(--line)); background: transparent; }
+    .button.secondary:hover { background: var(--blue-soft); }
+    .button.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); background: transparent; }
+    .button.danger:hover { background: var(--red-soft); }
+    .button.compact { min-height: 34px; padding: 0 12px; font-size: 13px; }
+    .button-symbol { font-size: 19px; font-weight: 500; line-height: 1; }
+    .icon-button { width: 34px; min-height: 34px; padding: 0; color: var(--muted); border-color: transparent; background: transparent; font-size: 19px; }
+    .icon-button:hover { color: var(--blue); background: var(--blue-soft); }
+
+    .subtle-divider { height: 1px; margin: 20px 0; background: var(--line); }
+    .inline-label { margin-bottom: 7px; color: var(--muted); font-size: 13px; font-weight: 650; }
+    .source-list, .failed-list, .citation-list, .field-result-list { display: grid; gap: 10px; margin: 14px 0 0; padding: 0; list-style: none; }
+    .source-item, .failed-item, .citation, .field-result { border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+    .source-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; }
+    .source-detail { min-width: 0; }
+    .path { overflow-wrap: anywhere; color: var(--text); font-size: 13px; line-height: 1.5; }
+    .muted { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .pill { display: inline-flex; align-items: center; min-height: 27px; padding: 0 9px; border-radius: 6px; color: var(--green); background: var(--green-soft); font-size: 12px; font-weight: 750; white-space: nowrap; }
+    .pill.processing { color: var(--amber); background: var(--amber-soft); }
+    .pill.failed { color: var(--red); background: var(--red-soft); }
+
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .metric { min-height: 79px; display: grid; place-items: center; align-content: center; border: 1px solid var(--metric-line); border-radius: 7px; background: var(--metric-bg); }
+    .metric strong { color: var(--metric-color); font-size: 27px; line-height: 1; font-weight: 800; }
+    .metric span { margin-top: 8px; color: var(--muted); font-size: 13px; font-weight: 650; }
+    .metric.blue { --metric-color: var(--blue); --metric-bg: var(--blue-soft); --metric-line: color-mix(in srgb, var(--blue) 17%, var(--line)); }
+    .metric.green { --metric-color: var(--green); --metric-bg: var(--green-soft); --metric-line: color-mix(in srgb, var(--green) 18%, var(--line)); }
+    .metric.red { --metric-color: var(--red); --metric-bg: var(--red-soft); --metric-line: color-mix(in srgb, var(--red) 18%, var(--line)); }
+    .metric.amber { --metric-color: var(--amber); --metric-bg: var(--amber-soft); --metric-line: color-mix(in srgb, var(--amber) 18%, var(--line)); }
+    .failed-area { margin-top: 16px; }
+    .failed-item { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 11px 12px; }
+    .failed-item .path { color: var(--text); }
+
+    .action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .answer-area, .field-results { margin-top: 16px; }
+    .answer-card { border-left: 3px solid var(--blue); border-radius: 0 7px 7px 0; padding: 14px 16px; color: var(--text); background: var(--blue-soft); white-space: pre-wrap; line-height: 1.7; }
+    .result-title { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
+    .citation { padding: 14px; }
+    .citation + .citation { margin-top: 10px; }
+    .citation-top, .field-result-top { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    .file-name { font-size: 14px; font-weight: 800; line-height: 1.45; }
+    .quote { margin: 10px 0 0; color: var(--text); font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+    .citation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .field-group + .field-group { margin-top: 18px; }
+    .field-group h3 { margin: 0 0 9px; color: var(--text); font-size: 15px; }
+    .field-result { padding: 13px; }
+    .field-result + .field-result { margin-top: 10px; }
+    .occurrence { min-width: 48px; text-align: center; padding: 5px 7px; border-radius: 5px; color: var(--blue); background: var(--blue-soft); font-size: 12px; font-weight: 800; }
+    .empty { padding: 12px 0; color: var(--muted); font-size: 13px; }
+
+    .toast { position: fixed; right: 24px; bottom: 24px; z-index: 50; max-width: min(440px, calc(100vw - 48px)); padding: 11px 14px; border: 1px solid color-mix(in srgb, var(--green) 24%, var(--line)); border-radius: 7px; color: var(--text); background: var(--surface); box-shadow: 0 12px 30px rgba(19, 37, 70, .16); font-size: 13px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: opacity .2s, transform .2s; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.error { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); color: var(--red); }
+
+    dialog { width: min(460px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--surface); box-shadow: 0 20px 70px rgba(10, 25, 55, .28); padding: 22px; }
+    dialog::backdrop { background: rgba(15, 29, 54, .35); backdrop-filter: blur(2px); }
+    dialog h2 { margin: 0 0 12px; font-size: 18px; }
+    dialog p { margin: 8px 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    dialog form { display: flex; justify-content: flex-end; margin-top: 18px; }
+
+    @media (max-width: 900px) {
+      .topbar { padding: 0 20px; }
+      main { padding: 16px 20px 36px; }
+      .workspace-grid { grid-template-columns: 1fr; }
+      .brand { gap: 12px; }
+      .brand-tagline { display: none; }
+    }
+    @media (max-width: 620px) {
+      .topbar { min-height: 62px; padding: 0 14px; }
+      .brand-name { font-size: 18px; }
+      .health { display: none; }
+      main { padding: 14px 12px 30px; }
+      .panel { padding: 16px; }
+      .form-row, .selection-row, .action-row { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: 1fr 1fr; gap: 10px; }
+      .source-item, .failed-item { align-items: stretch; flex-direction: column; }
+      .citation-top, .field-result-top { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-name">企业文档智能检索</div>
+    </div>
+    <div class="top-actions">
+      <button id="help-button" class="icon-button" type="button" title="使用指南" aria-label="使用指南">?</button>
+      <button id="theme-button" class="icon-button" type="button" title="切换深浅主题" aria-label="切换深浅主题">☼</button>
+      <div id="health-wrap" class="health"><span class="health-dot"></span><span id="health">连接中</span></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="workspace-grid">
+      <section class="panel" aria-labelledby="knowledge-base-heading">
+        <div class="panel-heading"><h2 id="knowledge-base-heading">知识库</h2></div>
+        <form id="knowledge-base-form">
+          <label><span class="field-label">知识库名称</span><input id="knowledge-base-name" required maxlength="120" placeholder="例如：内镜清洗规范"></label>
+          <button class="button primary-wide" type="submit"><span class="button-symbol">＋</span>新建知识库</button>
+        </form>
+        <div class="subtle-divider"></div>
+        <div class="inline-label">当前知识库</div>
+        <div class="selection-row">
+          <select id="knowledge-base-select" aria-label="当前知识库"></select>
+          <button id="delete-knowledge-base" type="button" class="button danger compact" title="删除当前知识库">删除知识库</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="source-heading">
+        <div class="panel-heading"><h2 id="source-heading">授权资料目录</h2></div>
+        <form id="source-form">
+          <label><span class="field-label">目录路径</span><input id="source-path" required placeholder="E:\work2607"></label>
+          <div class="form-row">
+            <label><span class="field-label">包含规则</span><input id="include-patterns" value="*;**/*"></label>
+            <label><span class="field-label">排除规则</span><input id="exclude-patterns" placeholder="例如：*.tmp"></label>
+          </div>
+          <button class="button primary-wide" type="submit"><span class="button-symbol">◌</span>授权并扫描</button>
+        </form>
+        <ul id="source-list" class="source-list"></ul>
+      </section>
+    </div>
+
+    <section class="panel" aria-labelledby="document-heading">
+      <div class="panel-heading">
+        <h2 id="document-heading">文档状态</h2>
+        <button id="refresh-status" class="icon-button" type="button" title="刷新文档状态" aria-label="刷新文档状态">↻</button>
+      </div>
+      <div id="document-list"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="field-heading">
+      <div class="panel-heading"><h2 id="field-heading">字段定位</h2></div>
+      <form id="field-search-form">
+        <label><textarea id="fields" required aria-label="字段" placeholder="一行一个字段，例如：&#10;物资清洗规范&#10;PSG-1500"></textarea></label>
+        <div><button class="button secondary" type="submit"><span class="button-symbol">⌕</span>查找文件</button></div>
+      </form>
+      <div id="field-results" class="field-results"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="question-heading">
+      <div class="panel-heading"><h2 id="question-heading">检索与问答</h2></div>
+      <form id="question-form">
+        <label><textarea id="question" required aria-label="问题" placeholder="例如：软式内镜清洗消毒的关键要求是什么？"></textarea></label>
+        <div class="action-row">
+          <button class="button" type="submit"><span class="button-symbol">⌁</span>提交问题</button>
+          <button id="search-button" type="button" class="button secondary"><span class="button-symbol">⌕</span>仅检索</button>
+        </div>
+      </form>
+      <div id="answer" class="answer-area"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <dialog id="help-dialog">
+    <h2>使用指南</h2>
+    <p>先创建或选择知识库，再授权一个或多个资料目录。授权后会自动扫描并在后台完成解析和切块。</p>
+    <p>字段定位适合查找词语出现的文件；检索与问答会给出答案、文件路径和可在线预览的相关片段。</p>
+    <form method="dialog"><button class="button compact" type="submit">知道了</button></form>
+  </dialog>
+
+  <script>
+    const state = { knowledgeBases: [], selectedKnowledgeBaseId: "", toastTimer: null, refreshing: false };
+    const byId = (id) => document.getElementById(id);
+    const selectedId = () => byId("knowledge-base-select").value;
+    const patterns = (value) => value.split(";").map((item) => item.trim()).filter(Boolean);
+
+    const request = async (url, options = {}) => {
+      const response = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+      const body = response.status === 204 ? null : await response.json();
+      if (!response.ok) throw new Error(body?.detail || "请求失败，请稍后重试");
+      return body;
+    };
+
+    function showToast(message, error = false) {
+      const toast = byId("toast");
+      window.clearTimeout(state.toastTimer);
+      toast.textContent = message;
+      toast.className = `toast show${error ? " error" : ""}`;
+      state.toastTimer = window.setTimeout(() => { toast.className = "toast"; }, 4500);
+    }
+
+    function setBusy(button, busy, label = "") {
+      if (!button.dataset.label) button.dataset.label = button.textContent;
+      button.disabled = busy;
+      button.textContent = busy ? (label || "处理中…") : button.dataset.label;
+    }
+
+    function setHealth(text, stateName = "") {
+      const wrap = byId("health-wrap");
+      wrap.className = `health${stateName ? ` is-${stateName}` : ""}`;
+      byId("health").textContent = text;
+    }
+
+    function statusBadge(scanState) {
+      const value = String(scanState || "idle").toLowerCase();
+      if (value === "scanning") return ["扫描中", "processing"];
+      if (value === "failed") return ["扫描异常", "failed"];
+      return ["已授权", ""];
+    }
+
+    async function refreshKnowledgeBases() {
+      state.knowledgeBases = await request("/api/v1/knowledge-bases");
+      const select = byId("knowledge-base-select");
+      const current = state.selectedKnowledgeBaseId || select.value;
+      select.replaceChildren();
+      if (!state.knowledgeBases.length) {
+        const option = new Option("请先新建知识库", "");
+        option.disabled = true;
+        option.selected = true;
+        select.append(option);
+      }
+      for (const kb of state.knowledgeBases) select.append(new Option(kb.name, kb.id));
+      if (state.knowledgeBases.some((kb) => kb.id === current)) select.value = current;
+      state.selectedKnowledgeBaseId = select.value || "";
+    }
+
+    async function refreshSources() {
+      const list = byId("source-list");
+      list.replaceChildren();
+      if (!selectedId()) return;
+      const sources = await request(`/api/v1/sources?knowledge_base_id=${encodeURIComponent(selectedId())}`);
+      if (!sources.length) {
+        const empty = document.createElement("li");
+        empty.className = "empty";
+        empty.textContent = "尚未授权资料目录";
+        list.append(empty);
+        return;
+      }
+      for (const source of sources) {
+        const [badgeText, badgeClass] = statusBadge(source.scan_state);
+        const item = document.createElement("li");
+        item.className = "source-item";
+        const detail = document.createElement("div");
+        detail.className = "source-detail";
+        const path = document.createElement("div");
+        path.className = "path";
+        path.textContent = source.root_path;
+        const stateLine = document.createElement("div");
+        stateLine.className = "muted";
+        stateLine.textContent = source.scan_state || "idle";
+        detail.append(path, stateLine);
+        const actions = document.createElement("div");
+        actions.style.display = "flex";
+        actions.style.alignItems = "center";
+        actions.style.gap = "10px";
+        const badge = document.createElement("span");
+        badge.className = `pill ${badgeClass}`.trim();
+        badge.textContent = badgeText;
+        const scan = document.createElement("button");
+        scan.className = "button secondary compact";
+        scan.type = "button";
+        scan.textContent = "↻ 重新扫描";
+        scan.onclick = async () => {
+          setBusy(scan, true, "扫描中…");
+          try {
+            const result = await request(`/api/v1/sources/${source.id}/scan`, { method: "POST" });
+            const counts = result.counts;
+            showToast(`已提交扫描：新增 ${counts.add}，更新 ${counts.update}，移动 ${counts.move}`);
+            await refreshSources();
+            await refreshDocuments();
+          } catch (error) { showToast(error.message, true); }
+          finally { setBusy(scan, false); }
+        };
+        actions.append(badge, scan);
+        item.append(detail, actions);
+        list.append(item);
+      }
+    }
+
+    function makeMetric(value, label, tone) {
+      const metric = document.createElement("div");
+      metric.className = `metric ${tone}`;
+      const number = document.createElement("strong");
+      number.textContent = Number(value || 0).toLocaleString("zh-CN");
+      const text = document.createElement("span");
+      text.textContent = label;
+      metric.append(number, text);
+      return metric;
+    }
+
+    async function refreshDocuments() {
+      const host = byId("document-list");
+      host.replaceChildren();
+      if (!selectedId()) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "请选择知识库后查看文档状态";
+        host.append(empty);
+        return;
+      }
+      const summary = await request(`/api/v1/documents/summary?knowledge_base_id=${encodeURIComponent(selectedId())}`);
+      const metrics = document.createElement("div");
+      metrics.className = "metrics";
+      metrics.append(
+        makeMetric(summary.total_files, "资料文件", "blue"),
+        makeMetric(summary.completed_files, "完成切块", "green"),
+        makeMetric(summary.failed_files, "失败", "red"),
+        makeMetric(summary.processing_files, "处理中", "amber"),
+      );
+      host.append(metrics);
+      if (!summary.failed_files) return;
+
+      const failedArea = document.createElement("div");
+      failedArea.className = "failed-area";
+      const title = document.createElement("div");
+      title.className = "result-title";
+      title.textContent = "失败文件";
+      const list = document.createElement("ul");
+      list.className = "failed-list";
+      const failed = await request(`/api/v1/documents/failed?knowledge_base_id=${encodeURIComponent(selectedId())}`);
+      for (const file of failed) {
+        const item = document.createElement("li");
+        item.className = "failed-item";
+        const detail = document.createElement("div");
+        const path = document.createElement("div");
+        path.className = "path";
+        path.textContent = file.canonical_path;
+        const error = document.createElement("div");
+        error.className = "muted";
+        error.textContent = file.error || "未记录失败原因";
+        detail.append(path, error);
+        item.append(detail);
+        list.append(item);
+      }
+      const retry = document.createElement("button");
+      retry.className = "button secondary compact";
+      retry.type = "button";
+      retry.textContent = "↻ 重试失败文件";
+      retry.onclick = async () => {
+        setBusy(retry, true, "提交中…");
+        try {
+          const result = await request(`/api/v1/documents/retry-failed?knowledge_base_id=${encodeURIComponent(selectedId())}`, { method: "POST" });
+          showToast(`已提交 ${result.queued_jobs} 个失败文件的重试任务`);
+          await refreshDocuments();
+        } catch (error) { showToast(error.message, true); }
+        finally { setBusy(retry, false); }
+      };
+      failedArea.append(title, list, retry);
+      host.append(failedArea);
+    }
+
+    function renderAnswer(result) {
+      const host = byId("answer");
+      host.replaceChildren();
+      const answer = document.createElement("div");
+      answer.className = "answer-card";
+      answer.textContent = result.answer || "未找到可用的匹配内容。";
+      host.append(answer);
+      if (!result.citations?.length) return;
+      const title = document.createElement("h3");
+      title.className = "result-title";
+      title.style.marginTop = "18px";
+      title.textContent = "检索结果";
+      const citations = document.createElement("div");
+      citations.className = "citation-list";
+      for (const citation of result.citations) {
+        const item = document.createElement("article");
+        item.className = "citation";
+        const top = document.createElement("div");
+        top.className = "citation-top";
+        const detail = document.createElement("div");
+        const file = document.createElement("div");
+        file.className = "file-name";
+        file.textContent = citation.file_name;
+        const path = document.createElement("div");
+        path.className = "muted path";
+        path.textContent = citation.canonical_path || "";
+        detail.append(file, path);
+        const rank = document.createElement("span");
+        rank.className = "occurrence";
+        rank.textContent = `结果 ${citation.citation_id}`;
+        top.append(detail, rank);
+        const position = [citation.page_no ? `第 ${citation.page_no} 页` : "", citation.section_path || ""].filter(Boolean).join(" · ");
+        if (position) {
+          const positionNode = document.createElement("div");
+          positionNode.className = "muted";
+          positionNode.style.marginTop = "8px";
+          positionNode.textContent = position;
+          item.append(top, positionNode);
+        } else {
+          item.append(top);
+        }
+        const quote = document.createElement("div");
+        quote.className = "quote";
+        quote.textContent = citation.quote || "";
+        const actions = document.createElement("div");
+        actions.className = "citation-actions";
+        const preview = document.createElement("button");
+        preview.className = "button secondary compact";
+        preview.type = "button";
+        preview.textContent = "查看上下文";
+        preview.onclick = () => window.open(`/api/v1/documents/${citation.document_id}/preview?chunk_id=${encodeURIComponent(citation.chunk_id)}#matched-context`, "_blank", "noopener");
+        actions.append(preview);
+        item.append(quote, actions);
+        citations.append(item);
+      }
+      host.append(title, citations);
+    }
+
+    function renderFieldResults(groups) {
+      const host = byId("field-results");
+      host.replaceChildren();
+      for (const group of groups) {
+        const section = document.createElement("section");
+        section.className = "field-group";
+        const title = document.createElement("h3");
+        title.textContent = group.field;
+        section.append(title);
+        if (!group.files.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "未找到匹配文件";
+          section.append(empty);
+          host.append(section);
+          continue;
+        }
+        const list = document.createElement("div");
+        list.className = "field-result-list";
+        for (const file of group.files) {
+          const item = document.createElement("article");
+          item.className = "field-result";
+          const top = document.createElement("div");
+          top.className = "field-result-top";
+          const detail = document.createElement("div");
+          const name = document.createElement("div");
+          name.className = "file-name";
+          name.textContent = file.file_name;
+          const path = document.createElement("div");
+          path.className = "muted path";
+          path.textContent = file.canonical_path;
+          detail.append(name, path);
+          const occurrences = document.createElement("span");
+          occurrences.className = "occurrence";
+          occurrences.textContent = `${file.occurrences} 处`;
+          top.append(detail, occurrences);
+          const quote = document.createElement("div");
+          quote.className = "quote";
+          quote.textContent = file.quote || "";
+          const preview = document.createElement("button");
+          preview.className = "button secondary compact";
+          preview.type = "button";
+          preview.textContent = "在线预览";
+          preview.onclick = () => window.open(`/api/v1/documents/${file.document_id}/preview`, "_blank", "noopener");
+          item.append(top, quote, preview);
+          list.append(item);
+        }
+        section.append(list);
+        host.append(section);
+      }
+    }
+
+    async function ask(endpoint, button) {
+      if (!selectedId()) throw new Error("请先选择知识库");
+      const question = byId("question").value.trim();
+      if (!question) throw new Error("请输入问题");
+      setBusy(button, true, endpoint.endsWith("query") ? "正在生成…" : "正在检索…");
+      try {
+        const key = endpoint.endsWith("query") ? "question" : "query";
+        const result = await request(endpoint, { method: "POST", body: JSON.stringify({ knowledge_base_id: selectedId(), [key]: question }) });
+        renderAnswer(Array.isArray(result) ? { answer: `共找到 ${result.length} 条相关结果`, citations: result.map((item, index) => ({ ...item, citation_id: index + 1 })) } : result);
+      } finally { setBusy(button, false); }
+    }
+
+    async function refreshAll() {
+      if (state.refreshing) return;
+      state.refreshing = true;
+      try {
+        await refreshKnowledgeBases();
+        await Promise.all([refreshSources(), refreshDocuments()]);
+      } finally { state.refreshing = false; }
+    }
+
+    byId("knowledge-base-form").onsubmit = async (event) => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector("button");
+      setBusy(button, true, "创建中…");
+      try {
+        const kb = await request("/api/v1/knowledge-bases", { method: "POST", body: JSON.stringify({ name: byId("knowledge-base-name").value }) });
+        state.selectedKnowledgeBaseId = kb.id;
+        byId("knowledge-base-name").value = "";
+        showToast("知识库已创建");
+        await refreshAll();
+      } catch (error) { showToast(error.message, true); }
+      finally { setBusy(button, false); }
+    };
+
+    byId("source-form").onsubmit = async (event) => {
+      event.preventDefault();
+      if (!selectedId()) { showToast("请先新建或选择知识库", true); return; }
+      const button = event.currentTarget.querySelector("button");
+      setBusy(button, true, "授权中…");
+      try {
+        const source = await request("/api/v1/sources", { method: "POST", body: JSON.stringify({ knowledge_base_id: selectedId(), root_path: byId("source-path").value.trim(), include_patterns: patterns(byId("include-patterns").value), exclude_patterns: patterns(byId("exclude-patterns").value) }) });
+        setBusy(button, true, "扫描中…");
+        const scan = await request(`/api/v1/sources/${source.id}/scan`, { method: "POST" });
+        const counts = scan.counts;
+        showToast(`目录已授权并提交扫描：新增 ${counts.add}，更新 ${counts.update}`);
+        await Promise.all([refreshSources(), refreshDocuments()]);
+      } catch (error) { showToast(error.message, true); }
+      finally { setBusy(button, false); }
+    };
+
+    byId("knowledge-base-select").onchange = async () => {
+      state.selectedKnowledgeBaseId = selectedId();
+      byId("field-results").replaceChildren();
+      byId("answer").replaceChildren();
+      await Promise.all([refreshSources(), refreshDocuments()]);
+    };
+
+    byId("delete-knowledge-base").onclick = async () => {
+      const id = selectedId();
+      const knowledgeBase = state.knowledgeBases.find((item) => item.id === id);
+      if (!knowledgeBase) { showToast("请先选择知识库", true); return; }
+      if (!window.confirm(`删除知识库“${knowledgeBase.name}”？\n\n知识库索引和授权目录将被删除，原始资料文件不会删除。`)) return;
+      const button = byId("delete-knowledge-base");
+      setBusy(button, true, "删除中…");
+      try {
+        const result = await request(`/api/v1/knowledge-bases/${encodeURIComponent(id)}`, { method: "DELETE" });
+        state.selectedKnowledgeBaseId = "";
+        byId("field-results").replaceChildren();
+        byId("answer").replaceChildren();
+        showToast(`知识库已删除，清理了 ${result.deleted_vectors} 条向量索引`);
+        await refreshAll();
+      } catch (error) { showToast(error.message, true); }
+      finally { setBusy(button, false); }
+    };
+
+    byId("refresh-status").onclick = async () => {
+      const button = byId("refresh-status");
+      setBusy(button, true, "…");
+      try { await refreshDocuments(); } catch (error) { showToast(error.message, true); }
+      finally { setBusy(button, false); }
+    };
+
+    byId("question-form").onsubmit = async (event) => {
+      event.preventDefault();
+      try { await ask("/api/v1/query", event.currentTarget.querySelector('button[type="submit"]')); }
+      catch (error) { showToast(error.message, true); }
+    };
+
+    byId("search-button").onclick = async () => {
+      try { await ask("/api/v1/search", byId("search-button")); }
+      catch (error) { showToast(error.message, true); }
+    };
+
+    byId("field-search-form").onsubmit = async (event) => {
+      event.preventDefault();
+      if (!selectedId()) { showToast("请先选择知识库", true); return; }
+      const button = event.currentTarget.querySelector("button");
+      const fields = byId("fields").value.split("\n").map((value) => value.trim()).filter(Boolean);
+      if (!fields.length) { showToast("请输入至少一个字段", true); return; }
+      setBusy(button, true, "检索中…");
+      try {
+        const groups = await request("/api/v1/field-search", { method: "POST", body: JSON.stringify({ knowledge_base_id: selectedId(), fields }) });
+        renderFieldResults(groups);
+      } catch (error) { showToast(error.message, true); }
+      finally { setBusy(button, false); }
+    };
+
+    byId("help-button").onclick = () => byId("help-dialog").showModal();
+    byId("theme-button").onclick = () => {
+      const root = document.documentElement;
+      const next = root.dataset.theme === "dark" ? "light" : "dark";
+      root.dataset.theme = next;
+      localStorage.setItem("rag-theme", next);
+      byId("theme-button").textContent = next === "dark" ? "☾" : "☼";
+    };
+
+    (async () => {
+      const savedTheme = localStorage.getItem("rag-theme");
+      if (savedTheme === "dark") {
+        document.documentElement.dataset.theme = "dark";
+        byId("theme-button").textContent = "☾";
+      }
+      try {
+        const health = await request("/health/ready");
+        setHealth(health.ok ? "服务正常" : "服务异常", health.ok ? "ready" : "error");
+        await refreshAll();
+      } catch (error) {
+        setHealth("服务不可用", "error");
+        showToast(error.message, true);
+      }
+    })();
+  </script>
+</body>
+</html>

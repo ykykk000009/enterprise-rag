@@ -1,0 +1,71 @@
+{
+  "project": {
+    "name": "enterprise-document-local-rag-agent",
+    "version": "0.1.0-mvp",
+    "language": "python",
+    "python_version": "3.11",
+    "deployment": "single_process_local_first"
+  },
+  "resource_targets": {
+    "cpu_cores_min": 4,
+    "ram_gb_min": 8,
+    "ram_gb_recommended_for_10gb_source": 16,
+    "gpu_required": false,
+    "idle_cpu_policy": "no continuous polling or model residency unless configured",
+    "indexing_concurrency": 1,
+    "embedding_batch_size": 8
+  },
+  "storage": {
+    "metadata": "sqlite_wal",
+    "keyword_search": "sqlite_fts5",
+    "vector_default": "qdrant_local",
+    "vector_alternative": "faiss",
+    "graph_phase_2": "sqlite_relational_tables"
+  },
+  "models": {
+    "embedding_default": "BAAI/bge-small-zh-v1.5",
+    "embedding_device": "cpu",
+    "reranker_enabled_default": false,
+    "generation_default": "small_qwen_gguf_via_llama_cpp",
+    "provider_interfaces_required": ["EmbeddingProvider", "RerankerProvider", "LLMProvider"]
+  },
+  "supported_files_mvp": ["pdf", "docx", "txt", "md"],
+  "chunking": {
+    "strategy": "structure_aware",
+    "target_tokens": 500,
+    "overlap_tokens": 60,
+    "min_tokens": 300,
+    "max_tokens": 800
+  },
+  "retrieval": {
+    "vector_top_k": 15,
+    "fts_top_k": 15,
+    "fusion": "rrf",
+    "rrf_k": 60,
+    "final_top_k": 6,
+    "citation_required": true,
+    "refuse_when_evidence_insufficient": true
+  },
+  "indexing": {
+    "whole_disk_scan": false,
+    "authorized_directories_only": true,
+    "source_access": "read_only",
+    "file_events": true,
+    "periodic_reconciliation": true,
+    "fingerprint": ["canonical_path", "size", "mtime_ns", "streaming_sha256"],
+    "update_strategy": "build_new_version_then_atomic_switch",
+    "task_persistence": "sqlite_jobs",
+    "idempotent": true
+  },
+  "forbidden_mvp_dependencies": [
+    "postgresql", "opensearch", "elasticsearch", "neo4j", "redis",
+    "celery", "kafka", "kubernetes", "microservices", "multi_agent"
+  ],
+  "phase_2": {
+    "knowledge_graph": true,
+    "blocks_mvp": false,
+    "implementation": "sqlite entities relations relation_evidence",
+    "activation_condition": "hybrid_rag_passes_acceptance_and_graph_ablation_shows_gain"
+  }
+}
+

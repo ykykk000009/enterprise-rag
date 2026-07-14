@@ -1,0 +1,69 @@
+{
+  "execution_policy": "sequential; a task is complete only after its checks pass",
+  "tasks": [
+    {
+      "id": "T01",
+      "name": "project_skeleton",
+      "outputs": ["FastAPI app", "settings", ".env.example", "SQLite initialization", "health endpoints", "test/lint configuration"],
+      "checks": ["application starts", "GET /health/live returns 200", "pytest passes", "ruff passes"]
+    },
+    {
+      "id": "T02",
+      "name": "metadata_and_job_state",
+      "depends_on": ["T01"],
+      "outputs": ["SQLite schema", "repositories", "document state machine", "persistent idempotent jobs"],
+      "checks": ["unique constraints enforced", "illegal state transition rejected", "duplicate job event does not duplicate task"]
+    },
+    {
+      "id": "T03",
+      "name": "authorized_source_and_incremental_scan",
+      "depends_on": ["T02"],
+      "outputs": ["authorized path validation", "watchdog debounce", "periodic reconciliation", "streaming fingerprint"],
+      "checks": ["path escape rejected", "new/update/move/delete detected", "unchanged file skipped"]
+    },
+    {
+      "id": "T04",
+      "name": "parsing_and_chunking",
+      "depends_on": ["T03"],
+      "outputs": ["PDF parser", "DOCX parser", "unified parsed document model", "structure-aware chunker"],
+      "checks": ["page and section metadata retained", "large file processed without full-corpus memory load", "fixture snapshots pass"]
+    },
+    {
+      "id": "T05",
+      "name": "local_indexes",
+      "depends_on": ["T04"],
+      "outputs": ["CPU embedding provider", "Qdrant Local adapter", "SQLite FTS5 index", "atomic version activation"],
+      "checks": ["vector/FTS counts match chunks", "failed update leaves old version queryable", "rename with same hash avoids re-embedding"]
+    },
+    {
+      "id": "T06",
+      "name": "hybrid_retrieval_and_cited_answers",
+      "depends_on": ["T05"],
+      "outputs": ["vector+FTS retrieval", "RRF fusion", "optional reranker", "context builder", "answer and citation validator"],
+      "checks": ["known-answer queries cite valid chunks", "unknown-answer queries refuse", "ACL filtering occurs before retrieval"]
+    },
+    {
+      "id": "T07",
+      "name": "minimal_ui_and_operations",
+      "depends_on": ["T06"],
+      "outputs": ["source management", "document/job status", "chat/search screen", "source jump", "backup/repair scripts"],
+      "checks": ["non-developer can add source and query", "restart resumes jobs", "repair script detects missing records"]
+    },
+    {
+      "id": "T08",
+      "name": "resource_and_quality_evaluation",
+      "depends_on": ["T07"],
+      "outputs": ["benchmark script", "RAG evaluation set", "resource report", "known limitations"],
+      "checks": ["8 GB RAM development profile tested", "10 GB source test method documented", "P50/P95 and peak RAM recorded"]
+    },
+    {
+      "id": "T09",
+      "name": "optional_sqlite_graph_rag",
+      "depends_on": ["T08"],
+      "optional": true,
+      "outputs": ["bounded domain schema", "entity/relation/evidence tables", "graph query router", "ablation evaluation"],
+      "checks": ["every relation has source evidence", "hybrid path still works with graph disabled", "multi-hop gain demonstrated before enabling"]
+    }
+  ]
+}
+

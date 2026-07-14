@@ -1,0 +1,20 @@
+{
+  "mvp_acceptance": [
+    {"id": "AC01", "given": "an authorized directory with PDF and DOCX", "when": "a scan runs", "then": "only files inside the authorized boundary are registered and indexed or receive explicit errors"},
+    {"id": "AC02", "given": "an indexed source", "when": "a new PDF is copied in", "then": "only the new file is indexed and becomes searchable without a full rebuild"},
+    {"id": "AC03", "given": "an indexed document", "when": "its content changes", "then": "the old version stays queryable until the new version is fully indexed and atomically activated"},
+    {"id": "AC04", "given": "an indexed document", "when": "it is renamed without content change", "then": "the path is updated and embeddings are reused"},
+    {"id": "AC05", "given": "an indexed document", "when": "it is deleted or permission is revoked", "then": "it immediately disappears from retrieval and derived records are cleaned later"},
+    {"id": "AC06", "given": "a question answerable from documents", "when": "the user queries", "then": "the answer cites filename, page/section and exact source excerpt"},
+    {"id": "AC07", "given": "a question not supported by the corpus", "when": "the user queries", "then": "the system reports insufficient evidence and does not use model knowledge to invent an answer"},
+    {"id": "AC08", "given": "a user without permission", "when": "the user queries restricted content", "then": "restricted chunks never enter candidate results"},
+    {"id": "AC09", "given": "an indexing job in progress", "when": "the application is interrupted and restarted", "then": "the job resumes or retries without duplicate chunks or vectors"},
+    {"id": "AC10", "given": "a 10 GB source directory", "when": "incremental indexing runs", "then": "files are processed sequentially/in batches and memory does not grow linearly with total corpus bytes"}
+  ],
+  "graph_acceptance": [
+    {"id": "GAC01", "then": "graph features can be disabled without breaking baseline RAG"},
+    {"id": "GAC02", "then": "every entity relation used in an answer links to one or more authorized source chunks"},
+    {"id": "GAC03", "then": "an ablation test shows useful gain on multi-hop questions before graph retrieval is enabled by default"}
+  ]
+}
+
