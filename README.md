@@ -4,7 +4,7 @@
 
 默认在本机运行 BGE 向量模型和 Qwen2.5 生成模型，**不需要商业大模型 API Key**。模型首次使用时从 Hugging Face 下载，之后可离线运行。
 
-## Windows 下载
+## Windows 下载（即下即用）  
 
 从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest) 下载 `EnterpriseDocumentRAG-windows-x64-online.zip`，完整解压后双击 `EnterpriseDocumentRAG.exe`。无需安装 Python。
 
