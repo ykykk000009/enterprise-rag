@@ -1,4 +1,4 @@
-## Enterprise Document Local RAG Agent
+## Document RAG
 
 本地优先的企业文档检索与引用问答应用。支持 PDF、DOCX、XLS/XLSX、TXT、Markdown 和 ZIP，可返回文件、页码、章节与原文引用。
 
@@ -6,7 +6,7 @@
 
 ## Windows 下载（即下即用）  
 
-从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest) 下载 `EnterpriseDocumentRAG-windows-x64-online.zip`，完整解压后双击 `EnterpriseDocumentRAG.exe`。无需安装 Python。
+从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest) 下载 `DocQA-vX.Y.Z-win-x64.zip`，完整解压后双击 `DocQA.exe`。无需安装 Python。
 
 详见 [Windows 下载安装说明](docs/INSTALL_WINDOWS.zh-CN.md)。
 

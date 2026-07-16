@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>文档智能检索</title>
+  <title>Document RAG</title>
   <style>
     :root {
       color-scheme: light;
@@ -75,6 +75,18 @@
     .health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 15%, transparent); }
     .health.is-ready .health-dot { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 15%, transparent); }
     .health.is-error .health-dot { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 15%, transparent); }
+
+    .update-banner { display: none; border-bottom: 1px solid #c9dafc; background: var(--blue-soft); }
+    .update-banner.visible { display: block; }
+    .update-banner-inner { width: min(100%, 1600px); min-height: 68px; margin: 0 auto; padding: 12px 48px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .update-summary { min-width: 0; }
+    .update-title { font-size: 14px; font-weight: 800; }
+    .update-notes { max-height: 44px; margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+    .update-progress { width: min(420px, 100%); height: 6px; margin-top: 8px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--blue) 14%, var(--surface)); }
+    .update-progress span { display: block; width: 0; height: 100%; background: var(--blue); transition: width .2s; }
+    .update-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+    .text-button { min-height: 32px; padding: 0 5px; border: 0; color: var(--muted); background: transparent; font-size: 13px; }
+    .text-button:hover { color: var(--text); }
 
     main { width: min(100%, 1600px); margin: 0 auto; padding: 18px 48px 48px; }
     .workspace-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(460px, 1fr); gap: 16px; }
@@ -170,9 +182,13 @@
     dialog h2 { margin: 0 0 12px; font-size: 18px; }
     dialog p { margin: 8px 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
     dialog form { display: flex; justify-content: flex-end; margin-top: 18px; }
+    .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .settings-value { color: var(--muted); font-size: 13px; }
+    .settings-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
     @media (max-width: 900px) {
       .topbar { padding: 0 20px; }
+      .update-banner-inner { padding: 12px 20px; }
       main { padding: 16px 20px 36px; }
       .workspace-grid { grid-template-columns: 1fr; }
       .brand { gap: 12px; }
@@ -180,6 +196,8 @@
     }
     @media (max-width: 620px) {
       .topbar { min-height: 62px; padding: 0 14px; }
+      .update-banner-inner { align-items: stretch; flex-direction: column; gap: 10px; padding: 12px 14px; }
+      .update-actions { flex-wrap: wrap; }
       .brand-name { font-size: 18px; }
       .health { display: none; }
       main { padding: 14px 12px 30px; }
@@ -198,10 +216,26 @@
     </div>
     <div class="top-actions">
       <button id="help-button" class="icon-button" type="button" title="使用指南" aria-label="使用指南">?</button>
+      <button id="settings-button" class="icon-button" type="button" title="设置" aria-label="设置">⚙</button>
       <button id="theme-button" class="icon-button" type="button" title="切换深浅主题" aria-label="切换深浅主题">☼</button>
       <div id="health-wrap" class="health"><span class="health-dot"></span><span id="health">连接中</span></div>
     </div>
   </header>
+
+  <section id="update-banner" class="update-banner" aria-live="polite">
+    <div class="update-banner-inner">
+      <div class="update-summary">
+        <div id="update-title" class="update-title"></div>
+        <div id="update-notes" class="update-notes"></div>
+        <div id="update-progress" class="update-progress" hidden><span id="update-progress-bar"></span></div>
+      </div>
+      <div class="update-actions">
+        <button id="update-now" class="button compact" type="button">立即更新</button>
+        <button id="update-later" class="text-button" type="button">稍后提醒</button>
+        <button id="update-skip" class="text-button" type="button">跳过此版本</button>
+      </div>
+    </div>
+  </section>
 
   <main>
     <div class="workspace-grid">
@@ -273,9 +307,20 @@
     <p>字段定位支持精确字符串查找和混合模糊检索；提交问题会生成有原文依据的答案，原文验证用于查看相关文件和片段。</p>
     <form method="dialog"><button class="button compact" type="submit">知道了</button></form>
   </dialog>
+  <dialog id="settings-dialog">
+    <h2>设置</h2>
+    <div class="settings-row">
+      <div>
+        <div class="result-title">软件更新</div>
+        <div id="settings-update-status" class="settings-value">正在读取版本信息</div>
+      </div>
+      <button id="check-update-button" class="button secondary compact" type="button">检查更新</button>
+    </div>
+    <div class="settings-actions"><button id="settings-close" class="button compact" type="button">关闭</button></div>
+  </dialog>
 
   <script>
-    const state = { knowledgeBases: [], selectedKnowledgeBaseId: "", toastTimer: null, refreshing: false };
+    const state = { knowledgeBases: [], selectedKnowledgeBaseId: "", toastTimer: null, refreshing: false, update: null, updatePollTimer: null, announcedVersion: "" };
     const byId = (id) => document.getElementById(id);
     const selectedId = () => byId("knowledge-base-select").value;
     const patterns = (value) => value.split(";").map((item) => item.trim()).filter(Boolean);
@@ -305,6 +350,76 @@
       const wrap = byId("health-wrap");
       wrap.className = `health${stateName ? ` is-${stateName}` : ""}`;
       byId("health").textContent = text;
+    }
+
+    function formatBytes(value) {
+      const bytes = Number(value || 0);
+      if (bytes < 1024) return `${bytes} B`;
+      const units = ["KB", "MB", "GB"];
+      let size = bytes;
+      let unit = "B";
+      for (const next of units) {
+        size /= 1024;
+        unit = next;
+        if (size < 1024) break;
+      }
+      return `${size.toFixed(size >= 100 ? 0 : 1)} ${unit}`;
+    }
+
+    function updateStatusText(update) {
+      const labels = {
+        idle: "尚未检查更新",
+        checking: "正在检查更新",
+        available: `发现新版本 v${update.latest_version}`,
+        deferred: `新版本 v${update.latest_version} 已设置稍后提醒`,
+        skipped: `已跳过 v${update.latest_version}`,
+        up_to_date: `当前已是最新版本 v${update.current_version}`,
+        downloading: `正在下载 v${update.latest_version}`,
+        downloaded: `v${update.latest_version} 已下载并通过校验`,
+        check_failed: update.error || "检查更新失败",
+        download_failed: update.error || "更新下载失败",
+      };
+      return labels[update.state] || `当前版本 v${update.current_version}`;
+    }
+
+    function renderUpdate(update) {
+      state.update = update;
+      if (update.recently_installed_version && state.announcedVersion !== update.recently_installed_version) {
+        state.announcedVersion = update.recently_installed_version;
+        showToast(`已成功更新到 v${update.recently_installed_version}，原知识库和索引已保留`);
+        request("/api/v1/updates/acknowledge-install", { method: "POST" }).catch(() => {});
+      }
+      byId("settings-update-status").textContent = updateStatusText(update);
+      const banner = byId("update-banner");
+      const visibleStates = new Set(["available", "downloading", "downloaded", "download_failed"]);
+      banner.classList.toggle("visible", visibleStates.has(update.state));
+      byId("update-title").textContent = updateStatusText(update);
+      byId("update-notes").textContent = update.release?.notes || "";
+      const downloading = update.state === "downloading";
+      const progress = byId("update-progress");
+      progress.hidden = !downloading;
+      if (downloading) {
+        const total = Number(update.total_bytes || 0);
+        const downloaded = Number(update.downloaded_bytes || 0);
+        const percent = total > 0 ? Math.min(100, downloaded / total * 100) : 0;
+        byId("update-progress-bar").style.width = `${percent}%`;
+        byId("update-notes").textContent = `正在下载：${formatBytes(downloaded)} / ${total ? formatBytes(total) : "未知大小"}`;
+      }
+      const now = byId("update-now");
+      now.disabled = downloading;
+      now.textContent = update.state === "downloaded" ? (update.install_supported ? "安装并重启" : "已完成下载") : (downloading ? "正在下载…" : "立即更新");
+      byId("update-later").hidden = downloading || update.state === "downloaded";
+      byId("update-skip").hidden = downloading || update.state === "downloaded";
+    }
+
+    async function refreshUpdateStatus() {
+      const update = await request("/api/v1/updates/status");
+      renderUpdate(update);
+      window.clearTimeout(state.updatePollTimer);
+      if (["checking", "downloading"].includes(update.state)) {
+        state.updatePollTimer = window.setTimeout(refreshUpdateStatus, 1200);
+      }
+      return update;
     }
 
     function statusBadge(scanState) {
@@ -707,6 +822,53 @@
     };
 
     byId("help-button").onclick = () => byId("help-dialog").showModal();
+    byId("settings-button").onclick = async () => {
+      byId("settings-dialog").showModal();
+      try { await refreshUpdateStatus(); } catch (error) { showToast(error.message, true); }
+    };
+    byId("settings-close").onclick = () => byId("settings-dialog").close();
+    byId("check-update-button").onclick = async () => {
+      const button = byId("check-update-button");
+      setBusy(button, true, "检查中…");
+      try {
+        await request("/api/v1/updates/check", { method: "POST" });
+        let update = await refreshUpdateStatus();
+        while (update.state === "checking") {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          update = await refreshUpdateStatus();
+        }
+        if (update.state === "check_failed") showToast(update.error || "检查更新失败", true);
+        else showToast(updateStatusText(update));
+      } catch (error) { showToast(error.message, true); }
+      finally { setBusy(button, false); }
+    };
+
+    byId("update-later").onclick = async () => {
+      try { renderUpdate(await request("/api/v1/updates/remind-later", { method: "POST" })); }
+      catch (error) { showToast(error.message, true); }
+    };
+    byId("update-skip").onclick = async () => {
+      if (!state.update?.latest_version) return;
+      try {
+        renderUpdate(await request("/api/v1/updates/skip", { method: "POST", body: JSON.stringify({ version: state.update.latest_version }) }));
+      } catch (error) { showToast(error.message, true); }
+    };
+    byId("update-now").onclick = async () => {
+      const button = byId("update-now");
+      try {
+        if (state.update?.state !== "downloaded") {
+          renderUpdate(await request("/api/v1/updates/download", { method: "POST" }));
+          return;
+        }
+        if (!state.update.install_supported) {
+          showToast("下载和校验已完成；开发模式不会覆盖源码");
+          return;
+        }
+        setBusy(button, true, "正在启动更新器…");
+        await request("/api/v1/updates/install", { method: "POST" });
+        showToast("正在退出旧版本并安装更新");
+      } catch (error) { showToast(error.message, true); setBusy(button, false); }
+    };
     byId("theme-button").onclick = () => {
       const root = document.documentElement;
       const next = root.dataset.theme === "dark" ? "light" : "dark";
@@ -724,7 +886,7 @@
       try {
         const health = await request("/health/ready");
         setHealth(health.ok ? "服务正常" : "服务异常", health.ok ? "ready" : "error");
-        await refreshAll();
+        await Promise.all([refreshAll(), refreshUpdateStatus()]);
       } catch (error) {
         setHealth("服务不可用", "error");
         showToast(error.message, true);

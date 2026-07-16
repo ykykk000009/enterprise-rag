@@ -2,9 +2,9 @@
 
 ## 下载与使用
 
-1. 从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest) 下载 `EnterpriseDocumentRAG-windows-x64-online.zip`。
-2. 将 ZIP 完整解压到 E 盘，例如 `E:\EnterpriseDocumentRAG`；不要在压缩包内运行。
-3. 双击 `EnterpriseDocumentRAG.exe`，等待浏览器自动打开。
+1. 从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest) 下载 `DocQA-vX.Y.Z-win-x64.zip`。
+2. 将 ZIP 完整解压到 E 盘，例如 `E:\DocQA`；不要在压缩包内运行。
+3. 双击 `DocQA.exe`，等待浏览器自动打开。
 4. 创建知识库，添加文档目录并扫描。
 5. 关闭启动器窗口即可退出。
 

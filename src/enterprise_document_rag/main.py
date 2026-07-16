@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .config import Settings, configure_huggingface_cache, get_settings
 from .db import initialize_sqlite, sqlite_connection, sqlite_health
 from .embeddings import build_embedding_provider
@@ -26,6 +27,7 @@ from .reranking import build_reranker
 from .retrieval import HybridRetriever
 from .security import PathAuthorizationError, resolve_authorized_root
 from .text_utils import clean_display_text
+from .updates import UpdateError, UpdateService, launch_updater
 from .vector_store import (
     close_local_vector_store,
     get_local_vector_store,
@@ -65,6 +67,10 @@ class FieldSearchRequest(BaseModel):
     mode: Literal["exact", "hybrid"] = "exact"
 
 
+class UpdateVersionRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=64)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or get_settings()
     configure_huggingface_cache(app_settings)
@@ -77,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker = IngestionWorker(settings=app_settings)
         app.state.ingestion_worker = worker
         worker.start()
+        app.state.update_service.start_background_check()
         try:
             yield
         finally:
@@ -84,11 +91,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             close_local_vector_store(path=str(app_settings.qdrant_path))
 
     app = FastAPI(
-        title="Enterprise Document Local RAG Agent",
-        version="0.1.0",
+        title="Document RAG",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.settings = app_settings
+    app.state.update_service = UpdateService(app_settings)
+    app.state.shutdown_callback = None
 
     @app.get("/")
     def home() -> FileResponse:
@@ -102,6 +111,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ready() -> dict[str, bool | str]:
         initialize_sqlite(app_settings)
         return sqlite_health(app_settings)
+
+    @app.get("/api/v1/updates/status")
+    def update_status() -> dict[str, object]:
+        return app.state.update_service.status()
+
+    @app.post("/api/v1/updates/check")
+    def check_for_updates() -> dict[str, object]:
+        return app.state.update_service.start_background_check(force=True)
+
+    @app.post("/api/v1/updates/skip")
+    def skip_update(request: UpdateVersionRequest) -> dict[str, object]:
+        try:
+            return app.state.update_service.skip(request.version)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="更新版本号格式无效") from exc
+
+    @app.post("/api/v1/updates/remind-later")
+    def remind_update_later() -> dict[str, object]:
+        return app.state.update_service.remind_later()
+
+    @app.post("/api/v1/updates/acknowledge-install")
+    def acknowledge_update_install() -> dict[str, object]:
+        return app.state.update_service.acknowledge_install()
+
+    @app.post("/api/v1/updates/download")
+    def download_update() -> dict[str, object]:
+        try:
+            return app.state.update_service.start_download()
+        except UpdateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/v1/updates/install")
+    def install_update() -> dict[str, str]:
+        with sqlite_connection(app_settings) as connection:
+            active_jobs = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'leased')"
+                ).fetchone()[0]
+            )
+        if active_jobs:
+            raise HTTPException(
+                status_code=409,
+                detail=f"仍有 {active_jobs} 个文档任务正在处理，请等待任务完成后更新",
+            )
+        try:
+            return launch_updater(
+                settings=app_settings,
+                status=app.state.update_service.status(),
+                shutdown_callback=app.state.shutdown_callback,
+            )
+        except UpdateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/knowledge-bases")
     def create_knowledge_base(request: KnowledgeBaseRequest) -> dict[str, str]:

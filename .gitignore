@@ -1,4 +1,12 @@
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+credentials*.json
+secrets*.json
 .pytest_cache/
 .ruff_cache/
 __pycache__/
@@ -8,6 +16,7 @@ data/
 models/
 knowledge/
 user-data/
+updates/
 dist/
 build/
 .venv-package/

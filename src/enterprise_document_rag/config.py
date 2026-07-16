@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     max_chunks_per_document: int = Field(default=1, ge=1)
     final_top_k: int = Field(default=10, ge=1)
     graph_rag_enabled: bool = False
+    app_data_dir: Path | None = None
+    update_enabled: bool = True
+    update_repository: str = "ykykk000009/enterprise-rag"
+    update_check_interval_hours: int = Field(default=24, ge=1, le=168)
+    update_request_timeout_seconds: int = Field(default=15, ge=3, le=120)
 
     @property
     def authorized_root_paths(self) -> tuple[Path, ...]:
@@ -65,6 +70,16 @@ class Settings(BaseSettings):
         if self.database_url.startswith("sqlite:///"):
             return Path(self.database_url.removeprefix("sqlite:///"))
         return Path(self.database_url)
+
+    @property
+    def application_data_path(self) -> Path:
+        if self.app_data_dir is not None:
+            return self.app_data_dir.expanduser().resolve()
+        database = self.database_path
+        if database == Path(":memory:"):
+            return Path.cwd()
+        resolved = database.expanduser().resolve()
+        return resolved.parent.parent if resolved.parent.name.lower() == "data" else resolved.parent
 
 
 @lru_cache

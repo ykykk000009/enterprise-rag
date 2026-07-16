@@ -35,7 +35,7 @@ docker compose up -d --build
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\build_windows.ps1
 ```
 
-脚本会创建独立环境、运行测试并生成 `dist/windows/EnterpriseDocumentRAG-windows-x64-online.zip`。携带模型的离线包可使用：
+脚本会创建独立环境、运行测试并生成 `dist/windows/DocQA-vX.Y.Z-win-x64.zip`。携带模型的离线包可使用：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -59,7 +59,7 @@ wheel 位于 `dist/`，不包含模型、索引或业务文档。
 
 - 源码推送到 Git；Windows ZIP 作为 GitHub Release 附件，不提交进 Git 历史。
 - 发布前运行 `pytest`、敏感信息扫描和干净 Windows 启动测试。
-- 构建脚本在 `dist/windows/EnterpriseDocumentRAG` 中发现 `user-data` 时会停止，防止把本地知识库或企业文档打入发布包。
+- 构建脚本在 `dist/windows/DocQA` 中发现 `user-data` 时会停止，防止把本地知识库或企业文档打入发布包。
 - 公网部署必须增加 HTTPS、身份认证、防火墙和服务端目录白名单。
 - 定期备份 `data/`，监控磁盘、内存、失败任务和 `/health/ready`。
 - 多实例部署前将 Qdrant Local 替换为 Qdrant Server，并增加任务协调。

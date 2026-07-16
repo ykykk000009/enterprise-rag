@@ -7,10 +7,12 @@ import socket
 import sys
 import threading
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 from tkinter import LEFT, Button, Frame, Label, StringVar, Tk, X, messagebox
 
-APP_NAME = "EnterpriseDocumentRAG"
+APP_NAME = "DocQA"
+LEGACY_APP_NAME = "EnterpriseDocumentRAG"
 
 
 def _application_home() -> Path:
@@ -19,7 +21,13 @@ def _application_home() -> Path:
         home = bundle / "user-data"
     else:
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        home = base / APP_NAME
+        preferred_home = base / APP_NAME
+        legacy_home = base / LEGACY_APP_NAME
+        home = (
+            legacy_home
+            if legacy_home.is_dir() and not preferred_home.exists()
+            else preferred_home
+        )
     for child in ("data", "knowledge", "models/huggingface"):
         (home / child).mkdir(parents=True, exist_ok=True)
     return home
@@ -35,6 +43,7 @@ def _configure_environment(home: Path) -> None:
     bundled_models = _bundle_home() / "models" / "huggingface"
     model_home = bundled_models if bundled_models.is_dir() else home / "models" / "huggingface"
     os.environ.setdefault("APP_ENV", "production")
+    os.environ.setdefault("APP_DATA_DIR", str(home))
     os.environ.setdefault("DATABASE_URL", f"sqlite:///{(home / 'data' / 'agent.db').as_posix()}")
     os.environ.setdefault("QDRANT_PATH", str(home / "data" / "qdrant"))
     os.environ.setdefault("AUTHORIZED_ROOTS", str(home / "knowledge"))
@@ -70,13 +79,17 @@ class DesktopLauncher:
         self.error: BaseException | None = None
 
         self.root = Tk()
-        self.root.title("企业文档智能检索")
+        self.root.title("Document RAG")
+        icon_path = _bundle_home() / "docqa.ico"
+        if icon_path.is_file():
+            with suppress(Exception):
+                self.root.iconbitmap(default=str(icon_path))
         self.root.geometry("520x230")
         self.root.minsize(480, 210)
         self.root.protocol("WM_DELETE_WINDOW", self.stop)
 
         self.status = StringVar(value="正在启动本地服务，请稍候……")
-        Label(self.root, text="企业文档智能检索", font=("Microsoft YaHei UI", 16, "bold")).pack(
+        Label(self.root, text="Document RAG", font=("Microsoft YaHei UI", 16, "bold")).pack(
             pady=(24, 10)
         )
         Label(self.root, textvariable=self.status, font=("Microsoft YaHei UI", 10)).pack(
@@ -111,8 +124,10 @@ class DesktopLauncher:
 
             from enterprise_document_rag.main import create_app
 
+            app = create_app()
+            app.state.shutdown_callback = self._shutdown_for_update
             config = uvicorn.Config(
-                create_app(),
+                app,
                 host="127.0.0.1",
                 port=self.port,
                 log_level="warning",
@@ -147,6 +162,11 @@ class DesktopLauncher:
             self.status.set("正在退出……")
             self.server.should_exit = True
         self.root.after(250, self.root.destroy)
+
+    def _shutdown_for_update(self) -> None:
+        if self.server is not None:
+            self.server.should_exit = True
+        self.root.after(0, self.root.destroy)
 
 
 def main() -> None:

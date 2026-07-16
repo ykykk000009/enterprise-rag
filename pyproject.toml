@@ -3,9 +3,9 @@ requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "enterprise-document-local-rag-agent"
-version = "0.1.0"
-description = "Local-first enterprise document retrieval and cited QA MVP."
+name = "document-rag"
+dynamic = ["version"]
+description = "Local-first document retrieval and cited QA application."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -27,6 +27,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 enterprise_document_rag = ["static/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "enterprise_document_rag.__version__"}
 
 [project.optional-dependencies]
 dev = [
