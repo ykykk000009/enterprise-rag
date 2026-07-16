@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     reranker_device: str = "cpu"
     reranker_batch_size: int = Field(default=16, ge=1, le=64)
     llm_backend: str = "qwen_transformers"
-    llm_model_id: str = "Qwen/Qwen2.5-0.5B-Instruct"
-    llm_max_new_tokens: int = Field(default=192, ge=32, le=512)
+    llm_model_id: str = "Qwen/Qwen3-0.6B"
+    llm_max_new_tokens: int = Field(default=320, ge=32, le=512)
     huggingface_home: Path | None = None
     authorized_roots: str = "./knowledge"
     chunk_size_tokens: int = Field(default=420, ge=1)

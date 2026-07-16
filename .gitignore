@@ -16,7 +16,10 @@ build/
 reports/
 evaluation/results/
 evaluation/dataset.jsonl
+evaluation/dataset_*.jsonl
+evaluation/dataset*_summary.json
 evaluation/rag_eval_set.json
 evaluation/report.md
 evaluation/gold_benchmark_report.md
 evaluation/hybrid_rerank_report.md
+tests/

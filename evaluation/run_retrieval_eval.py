@@ -18,14 +18,18 @@ def run(
     evaluated_cases = cases if include_unvalidated else official_cases
     rows = []
     official_labels: list[list[bool]] = []
+    official_totals: list[int] = []
     diagnostic_labels: list[list[bool]] = []
+    diagnostic_totals: list[int] = []
+    official_by_category: dict[str, list[tuple[list[bool], int]]] = {}
+    diagnostic_by_category: dict[str, list[tuple[list[bool], int]]] = {}
     for case in evaluated_cases:
         try:
             results = retrieve(
                 base_url=base_url,
                 knowledge_base_id=knowledge_base_id,
                 question=case["question"],
-                top_k=10,
+                top_k=15,
             )
             relevance = [source_matches(result, case["relevant_sources"]) for result in results]
             rows.append(
@@ -33,6 +37,8 @@ def run(
                     "id": case["id"],
                     "validated": case["validated"],
                     "question": case["question"],
+                    "category": case.get("category", "unknown"),
+                    "difficulty": case.get("difficulty", "unknown"),
                     "results": results,
                     "relevance": relevance,
                     "error": None,
@@ -40,8 +46,18 @@ def run(
             )
             if case["validated"]:
                 official_labels.append(relevance)
+                relevant_total = len(case["relevant_sources"])
+                official_totals.append(relevant_total)
+                official_by_category.setdefault(case.get("category", "unknown"), []).append(
+                    (relevance, relevant_total)
+                )
             else:
                 diagnostic_labels.append(relevance)
+                relevant_total = len(case["relevant_sources"])
+                diagnostic_totals.append(relevant_total)
+                diagnostic_by_category.setdefault(
+                    case.get("category", "unknown"), []
+                ).append((relevance, relevant_total))
         except Exception as exc:
             rows.append(
                 {
@@ -65,13 +81,36 @@ def run(
         }
         if diagnostic_labels:
             result["diagnostic_source_match_metrics"] = {
-                f"@{k}": retrieval_metrics(diagnostic_labels, k) for k in (1, 3, 5, 10)
+                f"@{k}": retrieval_metrics(diagnostic_labels, k, diagnostic_totals)
+                for k in (1, 3, 5, 10, 15)
+            }
+            result["diagnostic_metrics_by_category"] = {
+                category: {
+                    f"@{k}": retrieval_metrics(
+                        [item[0] for item in category_rows],
+                        k,
+                        [item[1] for item in category_rows],
+                    )
+                    for k in (1, 3, 5, 10, 15)
+                }
+                for category, category_rows in sorted(diagnostic_by_category.items())
             }
         return result
+    by_category = {}
+    for category, category_rows in sorted(official_by_category.items()):
+        labels = [item[0] for item in category_rows]
+        totals = [item[1] for item in category_rows]
+        by_category[category] = {
+            f"@{k}": retrieval_metrics(labels, k, totals) for k in (1, 3, 5, 10, 15)
+        }
     return {
         "status": "MEASURED",
         "official_case_count": len(official_cases),
-        "metrics": {f"@{k}": retrieval_metrics(official_labels, k) for k in (1, 3, 5, 10)},
+        "metrics": {
+            f"@{k}": retrieval_metrics(official_labels, k, official_totals)
+            for k in (1, 3, 5, 10, 15)
+        },
+        "metrics_by_category": by_category,
     }
 
 

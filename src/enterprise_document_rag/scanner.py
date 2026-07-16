@@ -7,7 +7,23 @@ from .repositories import DocumentRepository, JobRepository
 from .security import authorize_path, resolve_authorized_root
 
 SUPPORTED_SUFFIXES = frozenset(
-    {".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".zip", ".txt", ".md"}
+    {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xlsx",
+        ".xlsm",
+        ".xls",
+        ".zip",
+        ".rar",
+        ".7z",
+        ".tar",
+        ".gz",
+        ".txt",
+        ".md",
+    }
 )
 
 

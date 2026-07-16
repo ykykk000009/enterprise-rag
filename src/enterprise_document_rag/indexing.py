@@ -80,7 +80,12 @@ class DocumentIndexer:
         canonical_path = str(document["canonical_path"])
         file_name = Path(canonical_path).name
         indexed_texts = tuple(
-            _indexed_chunk_text(canonical_path=canonical_path, text=chunk.text) for chunk in chunks
+            _indexed_chunk_text(
+                canonical_path=canonical_path,
+                section_path=chunk.section_path,
+                text=chunk.text,
+            )
+            for chunk in chunks
         )
 
         self._set_version_state(document_version_id, "indexing")
@@ -209,7 +214,7 @@ class DocumentIndexer:
                     chunk_ids[index],
                     document_version_id,
                     chunk.chunk_index,
-                    indexed_texts[index],
+                    chunk.text,
                     chunk.page_no,
                     " / ".join(chunk.section_path),
                     json.dumps(chunk.bbox) if chunk.bbox is not None else None,
@@ -313,5 +318,13 @@ class DocumentIndexer:
         self.connection.commit()
 
 
-def _indexed_chunk_text(*, canonical_path: str, text: str) -> str:
-    return f"文件名：{Path(canonical_path).name}\n文件路径：{canonical_path}\n{text}"
+def _indexed_chunk_text(
+    *, canonical_path: str, section_path: tuple[str, ...], text: str
+) -> str:
+    metadata = [
+        f"文件名：{Path(canonical_path).name}",
+        f"文件路径：{canonical_path}",
+    ]
+    if section_path:
+        metadata.append(f"位置：{' / '.join(section_path)}")
+    return "\n".join([*metadata, text])

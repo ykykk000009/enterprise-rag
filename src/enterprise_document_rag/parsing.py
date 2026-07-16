@@ -1,4 +1,10 @@
+import gzip
+import os
 import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -6,6 +12,7 @@ from io import BytesIO
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 import pymupdf
@@ -14,8 +21,10 @@ from openpyxl import load_workbook
 
 from .ocr import OcrProvider, RapidOcrProvider
 
-PARSER_VERSION = "parser-v2"
-ARCHIVE_MEMBER_SUFFIXES = frozenset({".pdf", ".docx", ".xlsx", ".xlsm", ".xls", ".txt", ".md"})
+PARSER_VERSION = "parser-v4"
+ARCHIVE_MEMBER_SUFFIXES = frozenset(
+    {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xlsx", ".xlsm", ".xls", ".txt", ".md"}
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,10 @@ class ArchiveLimitError(ValueError):
     pass
 
 
+class OfficeParsingError(ValueError):
+    pass
+
+
 def normalize_text(text: str) -> str:
     lines = [" ".join(line.split()) for line in text.splitlines()]
     return "\n".join(line for line in lines if line).strip()
@@ -87,12 +100,40 @@ def parse_document(
             ocr_min_text_chars=ocr_min_text_chars_per_page,
             ocr_provider=ocr_provider,
         )
+    if suffix == ".doc":
+        return parse_doc(resolved)
+    if suffix in {".ppt", ".pptx"}:
+        return parse_presentation(resolved)
     if suffix in {".xlsx", ".xlsm"}:
         return parse_xlsx(resolved)
     if suffix == ".xls":
         return parse_xls(resolved)
     if suffix == ".zip":
         return parse_zip(
+            resolved,
+            ocr_enabled=ocr_enabled,
+            ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+            ocr_render_dpi=ocr_render_dpi,
+            ocr_provider=ocr_provider,
+            max_members=archive_max_members,
+            max_member_bytes=archive_max_member_bytes,
+            max_uncompressed_bytes=archive_max_uncompressed_bytes,
+            max_compression_ratio=archive_max_compression_ratio,
+        )
+    if suffix in {".tar", ".gz"}:
+        return parse_tar_or_gzip(
+            resolved,
+            ocr_enabled=ocr_enabled,
+            ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+            ocr_render_dpi=ocr_render_dpi,
+            ocr_provider=ocr_provider,
+            max_members=archive_max_members,
+            max_member_bytes=archive_max_member_bytes,
+            max_uncompressed_bytes=archive_max_uncompressed_bytes,
+            max_compression_ratio=archive_max_compression_ratio,
+        )
+    if suffix in {".rar", ".7z"}:
+        return parse_external_archive(
             resolved,
             ocr_enabled=ocr_enabled,
             ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
@@ -272,6 +313,170 @@ def _parse_docx_document(
     )
 
 
+def parse_doc(path: str | Path) -> ParsedDocument:
+    """Extract legacy Word content through the locally installed Microsoft Word."""
+    resolved = Path(path).resolve(strict=True)
+    pythoncom, client = _office_com_modules("Microsoft Word")
+    application = document = None
+    try:
+        application = client.DispatchEx("Word.Application")
+        application.Visible = False
+        application.DisplayAlerts = 0
+        document = application.Documents.Open(
+            str(resolved),
+            ConfirmConversions=False,
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Visible=False,
+            OpenAndRepair=True,
+        )
+        blocks: list[ParsedBlock] = []
+        for index in range(1, document.Paragraphs.Count + 1):
+            text = normalize_text(str(document.Paragraphs(index).Range.Text))
+            if text:
+                blocks.append(ParsedBlock(text=text, page_no=None))
+        for table_index in range(1, document.Tables.Count + 1):
+            table = document.Tables(table_index)
+            rows: list[str] = []
+            for row_index in range(1, table.Rows.Count + 1):
+                row = table.Rows(row_index)
+                cells = [normalize_text(str(cell.Range.Text)) for cell in row.Cells]
+                if any(cells):
+                    rows.append("\t".join(cells))
+            if rows:
+                blocks.append(ParsedBlock(text="\n".join(rows), page_no=None, block_type="table"))
+        return ParsedDocument(
+            source_path=str(resolved),
+            parser_version=PARSER_VERSION,
+            pages=(ParsedPage(page_no=None, blocks=tuple(blocks)),),
+        )
+    except Exception as exc:
+        raise OfficeParsingError(f"unable to parse legacy Word document: {resolved.name}") from exc
+    finally:
+        if document is not None:
+            document.Close(False)
+        if application is not None:
+            application.Quit()
+        pythoncom.CoUninitialize()
+
+
+def parse_presentation(path: str | Path) -> ParsedDocument:
+    """Extract presentation content without relying on interactive Office automation."""
+    resolved = Path(path).resolve(strict=True)
+    if resolved.suffix.lower() == ".pptx":
+        return parse_pptx(resolved)
+    return _parse_legacy_presentation(resolved)
+
+
+def parse_pptx(path: str | Path) -> ParsedDocument:
+    """Read PPTX slide text directly from its Open XML package without COM automation."""
+    resolved = Path(path).resolve(strict=True)
+    try:
+        with ZipFile(resolved) as package:
+            slide_names = sorted(
+                (
+                    name
+                    for name in package.namelist()
+                    if re.fullmatch(r"ppt/slides/slide[0-9]+\.xml", name)
+                ),
+                key=_pptx_slide_sort_key,
+            )
+            pages = []
+            for slide_index, slide_name in enumerate(slide_names, start=1):
+                root = ElementTree.fromstring(package.read(slide_name))
+                text_parts = [
+                    normalized
+                    for node in root.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}t")
+                    if (normalized := normalize_text(node.text or ""))
+                ]
+                blocks = (
+                    (ParsedBlock(text="\n".join(text_parts), page_no=slide_index),)
+                    if text_parts
+                    else ()
+                )
+                pages.append(ParsedPage(page_no=slide_index, blocks=blocks))
+    except (BadZipFile, ElementTree.ParseError, KeyError, OSError) as exc:
+        raise OfficeParsingError(f"unable to parse PPTX presentation: {resolved.name}") from exc
+    if not pages:
+        raise OfficeParsingError(f"PPTX contains no slides: {resolved.name}")
+    return ParsedDocument(
+        source_path=str(resolved), parser_version=PARSER_VERSION, pages=tuple(pages)
+    )
+
+
+def _pptx_slide_sort_key(slide_name: str) -> int:
+    match = re.search(r"slide([0-9]+)\.xml$", slide_name)
+    return int(match.group(1)) if match else 0
+
+
+def _parse_legacy_presentation(resolved: Path) -> ParsedDocument:
+    """Extract legacy PPT text boxes and tables through local PowerPoint."""
+    pythoncom, client = _office_com_modules("Microsoft PowerPoint")
+    application = presentation = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="enterprise-rag-ppt-") as directory:
+            temporary_path = Path(directory) / "presentation.ppt"
+            shutil.copyfile(resolved, temporary_path)
+            application = client.DispatchEx("PowerPoint.Application")
+            presentation = application.Presentations.Open(str(temporary_path), 1, 0, 0)
+            pages: list[ParsedPage] = []
+            for slide_index in range(1, presentation.Slides.Count + 1):
+                slide = presentation.Slides(slide_index)
+                blocks: list[ParsedBlock] = []
+                for shape_index in range(1, slide.Shapes.Count + 1):
+                    shape = slide.Shapes(shape_index)
+                    if shape.HasTable:
+                        table = shape.Table
+                        rows = []
+                        for row_index in range(1, table.Rows.Count + 1):
+                            cells = [
+                                normalize_text(
+                                    str(
+                                        table.Cell(row_index, col_index)
+                                        .Shape.TextFrame.TextRange.Text
+                                    )
+                                )
+                                for col_index in range(1, table.Columns.Count + 1)
+                            ]
+                            if any(cells):
+                                rows.append("\t".join(cells))
+                        if rows:
+                            blocks.append(
+                                ParsedBlock(
+                                    text="\n".join(rows),
+                                    page_no=slide_index,
+                                    block_type="table",
+                                )
+                            )
+                        continue
+                    if shape.HasTextFrame and shape.TextFrame.HasText:
+                        text = normalize_text(str(shape.TextFrame.TextRange.Text))
+                        if text:
+                            blocks.append(ParsedBlock(text=text, page_no=slide_index))
+                pages.append(ParsedPage(page_no=slide_index, blocks=tuple(blocks)))
+        return ParsedDocument(
+            source_path=str(resolved), parser_version=PARSER_VERSION, pages=tuple(pages)
+        )
+    except Exception as exc:
+        raise OfficeParsingError(f"unable to parse presentation: {resolved.name}") from exc
+    finally:
+        if presentation is not None:
+            presentation.Close()
+        if application is not None:
+            application.Quit()
+        pythoncom.CoUninitialize()
+
+
+def _office_com_modules(application_name: str):
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise OfficeParsingError(f"{application_name} integration is unavailable") from exc
+    pythoncom.CoInitialize()
+    return pythoncom, win32com.client
+
+
 def parse_text_file(path: str | Path, *, markdown: bool) -> ParsedDocument:
     resolved = Path(path).resolve(strict=True)
     return _parse_text_content(
@@ -433,6 +638,260 @@ def _parse_xls_workbook(*, workbook, source_path: str) -> ParsedDocument:
     )
 
 
+def parse_tar_or_gzip(
+    path: str | Path,
+    *,
+    ocr_enabled: bool,
+    ocr_min_text_chars_per_page: int,
+    ocr_render_dpi: int,
+    ocr_provider: OcrProvider | None,
+    max_members: int,
+    max_member_bytes: int,
+    max_uncompressed_bytes: int,
+    max_compression_ratio: int,
+) -> ParsedDocument:
+    resolved = Path(path).resolve(strict=True)
+    if tarfile.is_tarfile(resolved):
+        return _parse_tar_archive(
+            resolved,
+            ocr_enabled=ocr_enabled,
+            ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+            ocr_render_dpi=ocr_render_dpi,
+            ocr_provider=ocr_provider,
+            max_members=max_members,
+            max_member_bytes=max_member_bytes,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+            max_compression_ratio=max_compression_ratio,
+        )
+
+    member_path = resolved.with_suffix("").name
+    if not _is_supported_archive_member(member_path):
+        raise ValueError("gzip file does not contain a supported document type")
+    with gzip.open(resolved, "rb") as stream:
+        contents = _read_limited(stream, max_member_bytes)
+    if len(contents) > max_uncompressed_bytes:
+        raise ArchiveLimitError("archive uncompressed size limit exceeded")
+    return _archive_document_from_pages(
+        resolved,
+        _parse_archive_member_pages(
+            member_path=member_path,
+            contents=contents,
+            ocr_enabled=ocr_enabled,
+            ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+            ocr_render_dpi=ocr_render_dpi,
+            ocr_provider=ocr_provider,
+        ),
+    )
+
+
+def _parse_tar_archive(
+    resolved: Path,
+    *,
+    ocr_enabled: bool,
+    ocr_min_text_chars_per_page: int,
+    ocr_render_dpi: int,
+    ocr_provider: OcrProvider | None,
+    max_members: int,
+    max_member_bytes: int,
+    max_uncompressed_bytes: int,
+    max_compression_ratio: int,
+) -> ParsedDocument:
+    pages: list[ParsedPage] = []
+    total_uncompressed_bytes = 0
+    archive_size = max(resolved.stat().st_size, 1)
+    with tarfile.open(resolved, mode="r:*") as archive:
+        members = [item for item in archive.getmembers() if item.isfile()]
+        if len(members) > max_members:
+            raise ArchiveLimitError(f"archive contains more than {max_members} files")
+        for member in members:
+            if not _is_supported_archive_member(member.name):
+                continue
+            if member.size > max_member_bytes:
+                raise ArchiveLimitError(
+                    f"archive member exceeds {max_member_bytes} bytes: {member.name}"
+                )
+            total_uncompressed_bytes += member.size
+            _validate_archive_size_limits(
+                total_uncompressed_bytes=total_uncompressed_bytes,
+                archive_size=archive_size,
+                max_uncompressed_bytes=max_uncompressed_bytes,
+                max_compression_ratio=max_compression_ratio,
+            )
+            stream = archive.extractfile(member)
+            if stream is None:
+                continue
+            with stream:
+                contents = _read_limited(stream, max_member_bytes)
+            pages.extend(
+                _parse_archive_member_pages(
+                    member_path=member.name,
+                    contents=contents,
+                    ocr_enabled=ocr_enabled,
+                    ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+                    ocr_render_dpi=ocr_render_dpi,
+                    ocr_provider=ocr_provider,
+                )
+            )
+    return _archive_document_from_pages(resolved, pages)
+
+
+def parse_external_archive(
+    path: str | Path,
+    *,
+    ocr_enabled: bool,
+    ocr_min_text_chars_per_page: int,
+    ocr_render_dpi: int,
+    ocr_provider: OcrProvider | None,
+    max_members: int,
+    max_member_bytes: int,
+    max_uncompressed_bytes: int,
+    max_compression_ratio: int,
+) -> ParsedDocument:
+    """Read RAR and 7z members through the locally available libarchive tool."""
+    resolved = Path(path).resolve(strict=True)
+    bsdtar = _find_bsdtar()
+    try:
+        listed = subprocess.run(
+            [bsdtar, "-tf", str(resolved)],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"unable to open archive: {resolved.name}") from exc
+
+    member_names = _decode_external_archive_names(listed.stdout).splitlines()
+    members = [line.strip() for line in member_names if line.strip()]
+    if len(members) > max_members:
+        raise ArchiveLimitError(f"archive contains more than {max_members} files")
+
+    pages: list[ParsedPage] = []
+    total_uncompressed_bytes = 0
+    archive_size = max(resolved.stat().st_size, 1)
+    for member_path in members:
+        if not _is_supported_archive_member(member_path):
+            continue
+        contents = _read_external_archive_member(bsdtar, resolved, member_path, max_member_bytes)
+        total_uncompressed_bytes += len(contents)
+        _validate_archive_size_limits(
+            total_uncompressed_bytes=total_uncompressed_bytes,
+            archive_size=archive_size,
+            max_uncompressed_bytes=max_uncompressed_bytes,
+            max_compression_ratio=max_compression_ratio,
+        )
+        pages.extend(
+            _parse_archive_member_pages(
+                member_path=member_path,
+                contents=contents,
+                ocr_enabled=ocr_enabled,
+                ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+                ocr_render_dpi=ocr_render_dpi,
+                ocr_provider=ocr_provider,
+            )
+        )
+    return _archive_document_from_pages(resolved, pages)
+
+
+def _find_bsdtar() -> str:
+    configured = os.environ.get("BSDTAR_PATH")
+    candidate = configured or shutil.which("bsdtar")
+    if candidate is None:
+        raise ValueError("RAR and 7z parsing requires a local bsdtar executable")
+    return candidate
+
+
+def _decode_external_archive_names(contents: bytes) -> str:
+    for encoding in ("utf-8", "mbcs", "gb18030"):
+        try:
+            return contents.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return contents.decode("gb18030", errors="replace")
+
+
+def _read_external_archive_member(
+    bsdtar: str,
+    archive_path: Path,
+    member_path: str,
+    max_member_bytes: int,
+) -> bytes:
+    process = subprocess.Popen(
+        [bsdtar, "-xOf", str(archive_path), member_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    try:
+        contents = _read_limited(process.stdout, max_member_bytes)
+        _, stderr = process.communicate()
+    except Exception:
+        process.kill()
+        process.communicate()
+        raise
+    if process.returncode != 0:
+        raise ValueError(stderr.decode("utf-8", errors="replace").strip() or "archive read failed")
+    return contents
+
+
+def _read_limited(stream, max_bytes: int) -> bytes:
+    contents = stream.read(max_bytes + 1)
+    if len(contents) > max_bytes:
+        raise ArchiveLimitError(f"archive member exceeds {max_bytes} bytes")
+    return contents
+
+
+def _validate_archive_size_limits(
+    *,
+    total_uncompressed_bytes: int,
+    archive_size: int,
+    max_uncompressed_bytes: int,
+    max_compression_ratio: int,
+) -> None:
+    if total_uncompressed_bytes > max_uncompressed_bytes:
+        raise ArchiveLimitError("archive uncompressed size limit exceeded")
+    if total_uncompressed_bytes > archive_size * max_compression_ratio:
+        raise ArchiveLimitError("archive compression ratio limit exceeded")
+
+
+def _is_supported_archive_member(member_path: str) -> bool:
+    normalized = member_path.replace("\\", "/")
+    return (
+        Path(normalized).suffix.lower() in ARCHIVE_MEMBER_SUFFIXES
+        and ".." not in Path(normalized).parts
+        and not normalized.startswith(("/", "__MACOSX/"))
+    )
+
+
+def _parse_archive_member_pages(
+    *,
+    member_path: str,
+    contents: bytes,
+    ocr_enabled: bool,
+    ocr_min_text_chars_per_page: int,
+    ocr_render_dpi: int,
+    ocr_provider: OcrProvider | None,
+) -> list[ParsedPage]:
+    try:
+        parsed = _parse_archive_member(
+            member_path=member_path,
+            contents=contents,
+            ocr_enabled=ocr_enabled,
+            ocr_min_text_chars_per_page=ocr_min_text_chars_per_page,
+            ocr_render_dpi=ocr_render_dpi,
+            ocr_provider=ocr_provider,
+        )
+    except (BadZipFile, OSError, RuntimeError, ValueError):
+        return []
+    return _prefix_archive_member(parsed=parsed, member_path=member_path)
+
+
+def _archive_document_from_pages(resolved: Path, pages: list[ParsedPage]) -> ParsedDocument:
+    if not pages:
+        raise ValueError("archive contains no readable supported documents")
+    return ParsedDocument(
+        source_path=str(resolved), parser_version=PARSER_VERSION, pages=tuple(pages)
+    )
+
+
 def parse_zip(
     path: str | Path,
     *,
@@ -456,12 +915,9 @@ def parse_zip(
                 raise ArchiveLimitError(f"archive contains more than {max_members} files")
             for member in members:
                 member_path = member.filename.replace("\\", "/")
-                suffix = Path(member_path).suffix.lower()
                 if (
-                    suffix not in ARCHIVE_MEMBER_SUFFIXES
+                    not _is_supported_archive_member(member_path)
                     or member.flag_bits & 0x1
-                    or ".." in Path(member_path).parts
-                    or member_path.startswith("__MACOSX/")
                 ):
                     continue
                 if member.file_size > max_member_bytes:
@@ -481,9 +937,9 @@ def parse_zip(
                     raise ArchiveLimitError(
                         f"archive compression ratio limit exceeded: {member_path}"
                     )
-                try:
-                    contents = archive.read(member)
-                    parsed = _parse_archive_member(
+                contents = archive.read(member)
+                pages.extend(
+                    _parse_archive_member_pages(
                         member_path=member_path,
                         contents=contents,
                         ocr_enabled=ocr_enabled,
@@ -491,9 +947,7 @@ def parse_zip(
                         ocr_render_dpi=ocr_render_dpi,
                         ocr_provider=ocr_provider,
                     )
-                except (BadZipFile, OSError, RuntimeError, ValueError):
-                    continue
-                pages.extend(_prefix_archive_member(parsed=parsed, member_path=member_path))
+                )
     except BadZipFile as exc:
         raise ValueError("invalid ZIP archive") from exc
     if not pages:
@@ -534,6 +988,18 @@ def _parse_archive_member(
             ocr_min_text_chars=ocr_min_text_chars_per_page,
             ocr_provider=ocr_provider,
         )
+    if suffix == ".doc":
+        return _parse_archive_office_member(
+            member_path=member_path,
+            contents=contents,
+            parser=parse_doc,
+        )
+    if suffix in {".ppt", ".pptx"}:
+        return _parse_archive_office_member(
+            member_path=member_path,
+            contents=contents,
+            parser=parse_presentation,
+        )
     if suffix in {".xlsx", ".xlsm"}:
         formula_workbook = load_workbook(
             filename=BytesIO(contents), read_only=True, data_only=False
@@ -563,6 +1029,20 @@ def _parse_archive_member(
     )
 
 
+def _parse_archive_office_member(*, member_path: str, contents: bytes, parser) -> ParsedDocument:
+    source_path = f"archive://{member_path}"
+    suffix = Path(member_path).suffix.lower()
+    with tempfile.TemporaryDirectory(prefix="enterprise-rag-office-") as directory:
+        member_file = Path(directory) / f"document{suffix}"
+        member_file.write_bytes(contents)
+        parsed = parser(member_file)
+    return ParsedDocument(
+        source_path=source_path,
+        parser_version=PARSER_VERSION,
+        pages=parsed.pages,
+    )
+
+
 def _prefix_archive_member(*, parsed: ParsedDocument, member_path: str) -> list[ParsedPage]:
     prefix = f"压缩包内文件：{member_path}"
     return [
@@ -570,7 +1050,7 @@ def _prefix_archive_member(*, parsed: ParsedDocument, member_path: str) -> list[
             page_no=page.page_no,
             blocks=tuple(
                 ParsedBlock(
-                    text=f"{prefix}\n{block.text}",
+                    text=block.text,
                     page_no=block.page_no,
                     section_path=(prefix, *block.section_path),
                     bbox=block.bbox,

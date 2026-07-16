@@ -43,15 +43,19 @@ def numeric_match(answer: str, expected: str) -> dict[str, bool]:
     }
 
 
-def retrieval_metrics(relevance: list[list[bool]], k: int) -> dict[str, float]:
+def retrieval_metrics(
+    relevance: list[list[bool]],
+    k: int,
+    relevant_totals: list[int] | None = None,
+) -> dict[str, float]:
     hit_rates: list[float] = []
     recalls: list[float] = []
     precisions: list[float] = []
     reciprocal_ranks: list[float] = []
     ndcgs: list[float] = []
-    for labels in relevance:
+    totals = relevant_totals or [sum(labels) for labels in relevance]
+    for labels, relevant_total in zip(relevance, totals, strict=True):
         top = labels[:k]
-        relevant_total = sum(labels)
         hit_rates.append(float(any(top)))
         recalls.append(sum(top) / relevant_total if relevant_total else 0.0)
         precisions.append(sum(top) / k)

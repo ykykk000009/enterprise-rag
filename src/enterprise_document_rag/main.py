@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
@@ -24,6 +25,7 @@ from .repositories import (
 from .reranking import build_reranker
 from .retrieval import HybridRetriever
 from .security import PathAuthorizationError, resolve_authorized_root
+from .text_utils import clean_display_text
 from .vector_store import (
     close_local_vector_store,
     get_local_vector_store,
@@ -48,6 +50,7 @@ class SearchRequest(BaseModel):
     knowledge_base_id: str
     query: str = Field(min_length=1)
     allowed_document_ids: list[str] | None = None
+    top_k: int | None = Field(default=None, ge=1, le=50)
 
 
 class QueryRequest(BaseModel):
@@ -59,6 +62,7 @@ class QueryRequest(BaseModel):
 class FieldSearchRequest(BaseModel):
     knowledge_base_id: str
     fields: list[str] = Field(min_length=1, max_length=50)
+    mode: Literal["exact", "hybrid"] = "exact"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -332,6 +336,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def search(request: SearchRequest) -> list[dict[str, object]]:
         with sqlite_connection(app_settings) as connection:
             retriever = _retriever(connection=connection, settings=app_settings)
+            if request.top_k is not None:
+                retriever.final_top_k = request.top_k
+                retriever.candidate_top_k = max(retriever.candidate_top_k, request.top_k)
             results = retriever.search(
                 knowledge_base_id=request.knowledge_base_id,
                 query=request.query,
@@ -345,13 +352,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not fields:
             raise HTTPException(status_code=422, detail="at least one non-empty field is required")
         with sqlite_connection(app_settings) as connection:
+            retriever = (
+                _retriever(connection=connection, settings=app_settings)
+                if request.mode == "hybrid"
+                else None
+            )
             return [
                 {
                     "field": field,
-                    "files": _field_matches(
-                        connection=connection,
-                        knowledge_base_id=request.knowledge_base_id,
-                        field=field,
+                    "mode": request.mode,
+                    "files": (
+                        _hybrid_field_matches(
+                            retriever=retriever,
+                            knowledge_base_id=request.knowledge_base_id,
+                            field=field,
+                        )
+                        if retriever is not None
+                        else _field_matches(
+                            connection=connection,
+                            knowledge_base_id=request.knowledge_base_id,
+                            field=field,
+                        )
                     ),
                 }
                 for field in fields
@@ -490,6 +511,7 @@ def _field_matches(*, connection, knowledge_base_id: str, field: str) -> list[di
                 "page_no": row["page_no"],
                 "section_path": row["section_path"],
                 "quote": _field_quote(row["text"], field),
+                "match_mode": "exact",
             },
         )
         item["matched_chunks"] += 1
@@ -497,7 +519,29 @@ def _field_matches(*, connection, knowledge_base_id: str, field: str) -> list[di
     return list(matches.values())
 
 
+def _hybrid_field_matches(
+    *, retriever: HybridRetriever, knowledge_base_id: str, field: str
+) -> list[dict[str, object]]:
+    return [
+        {
+            "document_id": result.document_id,
+            "file_name": result.file_name,
+            "canonical_path": result.canonical_path,
+            "matched_chunks": 1,
+            "occurrences": result.quote.count(field),
+            "page_no": result.page_no,
+            "section_path": result.section_path,
+            "quote": result.quote,
+            "match_mode": "hybrid",
+            "score": result.score,
+            "sources": sorted(result.sources),
+        }
+        for result in retriever.search(knowledge_base_id=knowledge_base_id, query=field)
+    ]
+
+
 def _field_quote(text: str, field: str, *, radius: int = 100) -> str:
+    text = clean_display_text(text)
     index = text.find(field)
     if index < 0:
         return text[: radius * 2]

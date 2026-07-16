@@ -12,6 +12,8 @@ from docx.oxml.text.paragraph import CT_P
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+from .text_utils import clean_display_text, merge_context_texts
+
 
 def render_document_preview(
     *,
@@ -83,6 +85,29 @@ def _render_indexed_chunks(
 ) -> str:
     if not indexed_chunks:
         return '<p class="empty">该文件尚无可预览的索引内容。</p>'
+    if focus_chunk_id is not None:
+        focus_index = next(
+            index
+            for index, chunk in enumerate(indexed_chunks)
+            if chunk["id"] == focus_chunk_id
+        )
+        selected = indexed_chunks[max(0, focus_index - 1) : focus_index + 2]
+        focus = indexed_chunks[focus_index]
+        position = []
+        if focus["page_no"] is not None:
+            position.append(f"第 {focus['page_no']} 页")
+        if focus["section_path"]:
+            position.append(str(focus["section_path"]))
+        meta = (
+            f'<div class="chunk-meta">{html.escape(" · ".join(position))}</div>'
+            if position
+            else ""
+        )
+        context = merge_context_texts([str(chunk["text"]) for chunk in selected])
+        return (
+            f"{meta}<h2>命中内容上下文</h2>"
+            f'<p id="matched-context" class="matched">{html.escape(context)}</p>'
+        )
     parts: list[str] = []
     for chunk in indexed_chunks:
         is_match = chunk["id"] == focus_chunk_id
@@ -94,7 +119,8 @@ def _render_indexed_chunks(
             position.append(str(chunk["section_path"]))
         if position:
             parts.append(f"<div class=\"chunk-meta\">{html.escape(' · '.join(position))}</div>")
-        parts.append(f"<p{attributes}>{html.escape(str(chunk['text']))}</p>")
+        display_text = clean_display_text(str(chunk["text"]))
+        parts.append(f"<p{attributes}>{html.escape(display_text)}</p>")
     return "\n".join(parts)
 
 

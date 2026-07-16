@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .embeddings import EmbeddingProvider
 from .reranking import Reranker
+from .text_utils import clean_display_text, is_near_duplicate, normalized_text_key
 from .vector_store import VectorStore
 
 
@@ -116,7 +117,7 @@ class HybridRetriever:
                     canonical_path=row["canonical_path"],
                     page_no=row["page_no"],
                     section_path=row["section_path"],
-                    quote=row["text"],
+                    quote=_focused_quote(text=str(row["text"]), query=query),
                     bbox=_parse_bbox(row["bbox"]),
                     score=rank_scores[chunk_id],
                     sources=frozenset(sources.get(chunk_id, set())),
@@ -163,6 +164,7 @@ class HybridRetriever:
         rank_scores: dict[str, float],
     ) -> list[str]:
         document_counts: dict[str, int] = {}
+        selected_text_keys: list[str] = []
         selected: list[str] = []
         for chunk_id in sorted(
             candidate_ids, key=lambda item: rank_scores.get(item, float("-inf")), reverse=True
@@ -173,7 +175,11 @@ class HybridRetriever:
             document_id = str(row["document_id"])
             if document_counts.get(document_id, 0) >= self.max_chunks_per_document:
                 continue
+            text_key = normalized_text_key(str(row["text"]))
+            if is_near_duplicate(text_key, selected_text_keys):
+                continue
             selected.append(chunk_id)
+            selected_text_keys.append(text_key)
             document_counts[document_id] = document_counts.get(document_id, 0) + 1
             if len(selected) >= self.final_top_k:
                 break
@@ -344,8 +350,7 @@ def _fts_terms(query: str) -> list[str]:
         if len(token) >= 2:
             terms.append(token)
     for sequence in re.findall(r"[\u4e00-\u9fff]+", query):
-        if len(sequence) <= 8:
-            terms.append(sequence)
+        terms.extend(_chinese_query_phrases(sequence))
     return list(dict.fromkeys(terms))[:16]
 
 
@@ -363,10 +368,10 @@ def _contains_terms(query: str) -> list[tuple[str, float]]:
         if len(token) >= 2:
             add(token, 20.0)
     for sequence in re.findall(r"[\u4e00-\u9fff]+", query):
-        if len(sequence) <= 8:
-            add(sequence, 30.0)
-        elif sequence not in _quoted_phrases(query):
+        if len(sequence) > 8 and sequence not in _quoted_phrases(query):
             add(sequence, 40.0)
+        for phrase in _chinese_query_phrases(sequence):
+            add(phrase, 20.0 + len(phrase) * 2.0)
         for index in range(len(sequence) - 1):
             add(sequence[index : index + 2], 2.0)
     return terms[:24]
@@ -375,6 +380,39 @@ def _contains_terms(query: str) -> list[tuple[str, float]]:
 def _quoted_phrases(query: str) -> list[str]:
     phrases = re.findall(r'[“"]([^”"]{2,120})[”"]', query)
     return list(dict.fromkeys(" ".join(phrase.split()) for phrase in phrases if phrase.strip()))
+
+
+def _chinese_query_phrases(sequence: str) -> list[str]:
+    question_suffixes = (
+        r"(?:\u662f\u4ec0\u4e48|\u6709\u54ea\u4e9b|"
+        r"\u600e\u4e48\u529e|\u5982\u4f55)$"
+    )
+    trimmed = re.sub(question_suffixes, "", sequence).lstrip("的中里")
+    phrases: list[str] = []
+
+    def add(value: str) -> None:
+        if 2 <= len(value) <= 12 and value not in phrases:
+            phrases.append(value)
+
+    add(trimmed)
+    for part in re.split(r"[\u7684\u4e2d\u91cc]", trimmed):
+        add(part)
+    return phrases
+
+
+def _focused_quote(*, text: str, query: str, max_chars: int = 900) -> str:
+    cleaned = clean_display_text(text)
+    paragraphs = [item.strip() for item in re.split(r"\n\s*\n", cleaned) if item.strip()]
+    if len(paragraphs) <= 3:
+        return cleaned
+    terms = _contains_terms(query)
+    scores = [
+        sum(weight for term, weight in terms if term in paragraph) for paragraph in paragraphs
+    ]
+    best_index = max(range(len(paragraphs)), key=scores.__getitem__)
+    selected = paragraphs[max(0, best_index - 2) : best_index + 3]
+    focused = "\n\n".join(selected)
+    return focused if len(focused) <= max_chars else focused[:max_chars].rstrip() + "..."
 
 
 def _lexical_overlap_score(query: str, text: str) -> float:

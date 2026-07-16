@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>企业文档智能检索</title>
+  <title>文档智能检索</title>
   <style>
     :root {
       color-scheme: light;
@@ -141,6 +141,11 @@
 
     .action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
     .answer-area, .field-results { margin-top: 16px; }
+    .result-section { display: grid; gap: 10px; }
+    .result-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .result-header .result-title { margin: 0; }
+    .collapse-button { min-height: 0; padding: 2px 0; border: 0; border-radius: 0; color: #8a94a3; background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+    .collapse-button:hover { color: var(--text); background: transparent; }
     .answer-card { border-left: 3px solid var(--blue); border-radius: 0 7px 7px 0; padding: 14px 16px; color: var(--text); background: var(--blue-soft); white-space: pre-wrap; line-height: 1.7; }
     .result-title { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
     .citation { padding: 14px; }
@@ -189,7 +194,7 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="brand-name">企业文档智能检索</div>
+      <div class="brand-name">文档智能检索</div>
     </div>
     <div class="top-actions">
       <button id="help-button" class="icon-button" type="button" title="使用指南" aria-label="使用指南">?</button>
@@ -203,8 +208,8 @@
       <section class="panel" aria-labelledby="knowledge-base-heading">
         <div class="panel-heading"><h2 id="knowledge-base-heading">知识库</h2></div>
         <form id="knowledge-base-form">
-          <label><span class="field-label">知识库名称</span><input id="knowledge-base-name" required maxlength="120" placeholder="例如：内镜清洗规范"></label>
-          <button class="button primary-wide" type="submit"><span class="button-symbol">＋</span>新建知识库</button>
+          <label><span class="field-label">知识库名称</span><input id="knowledge-base-name" required maxlength="120" placeholder="例如：RAG功能"></label>
+          <button class="button primary-wide" type="submit">新建知识库</button>
         </form>
         <div class="subtle-divider"></div>
         <div class="inline-label">当前知识库</div>
@@ -217,12 +222,12 @@
       <section class="panel" aria-labelledby="source-heading">
         <div class="panel-heading"><h2 id="source-heading">授权资料目录</h2></div>
         <form id="source-form">
-          <label><span class="field-label">目录路径</span><input id="source-path" required placeholder="E:\work2607"></label>
+          <label><span class="field-label">目录路径</span><input id="source-path" required placeholder="E:\test"></label>
           <div class="form-row">
             <label><span class="field-label">包含规则</span><input id="include-patterns" value="*;**/*"></label>
             <label><span class="field-label">排除规则</span><input id="exclude-patterns" placeholder="例如：*.tmp"></label>
           </div>
-          <button class="button primary-wide" type="submit"><span class="button-symbol">◌</span>授权并扫描</button>
+          <button class="button primary-wide" type="submit">授权并扫描</button>
         </form>
         <ul id="source-list" class="source-list"></ul>
       </section>
@@ -239,8 +244,11 @@
     <section class="panel" aria-labelledby="field-heading">
       <div class="panel-heading"><h2 id="field-heading">字段定位</h2></div>
       <form id="field-search-form">
-        <label><textarea id="fields" required aria-label="字段" placeholder="一行一个字段，例如：&#10;物资清洗规范&#10;PSG-1500"></textarea></label>
-        <div><button class="button secondary" type="submit"><span class="button-symbol">⌕</span>查找文件</button></div>
+        <label><textarea id="fields" required aria-label="字段" placeholder="一行一个字段，例如：&#10;RAG功能&#10"></textarea></label>
+        <div class="action-row">
+          <button id="field-exact-button" class="button secondary" type="submit">精确字符串查找</button>
+          <button id="field-hybrid-button" class="button secondary" type="button">混合模糊检索</button>
+        </div>
       </form>
       <div id="field-results" class="field-results"></div>
     </section>
@@ -248,10 +256,10 @@
     <section class="panel" aria-labelledby="question-heading">
       <div class="panel-heading"><h2 id="question-heading">检索与问答</h2></div>
       <form id="question-form">
-        <label><textarea id="question" required aria-label="问题" placeholder="例如：软式内镜清洗消毒的关键要求是什么？"></textarea></label>
+        <label><textarea id="question" required aria-label="问题" placeholder="例如：RAG的功能是什么？"></textarea></label>
         <div class="action-row">
-          <button class="button" type="submit"><span class="button-symbol">⌁</span>提交问题</button>
-          <button id="search-button" type="button" class="button secondary"><span class="button-symbol">⌕</span>仅检索</button>
+          <button class="button" type="submit">提交问题</button>
+          <button id="search-button" type="button" class="button secondary">原文验证</button>
         </div>
       </form>
       <div id="answer" class="answer-area"></div>
@@ -262,7 +270,7 @@
   <dialog id="help-dialog">
     <h2>使用指南</h2>
     <p>先创建或选择知识库，再授权一个或多个资料目录。授权后会自动扫描并在后台完成解析和切块。</p>
-    <p>字段定位适合查找词语出现的文件；检索与问答会给出答案、文件路径和可在线预览的相关片段。</p>
+    <p>字段定位支持精确字符串查找和混合模糊检索；提交问题会生成有原文依据的答案，原文验证用于查看相关文件和片段。</p>
     <form method="dialog"><button class="button compact" type="submit">知道了</button></form>
   </dialog>
 
@@ -447,18 +455,39 @@
       host.append(failedArea);
     }
 
+    function createCollapsibleResult(titleText, body) {
+      const section = document.createElement("section");
+      section.className = "result-section";
+      const header = document.createElement("div");
+      header.className = "result-header";
+      const title = document.createElement("h3");
+      title.className = "result-title";
+      title.textContent = titleText;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "collapse-button";
+      toggle.textContent = "收起";
+      toggle.onclick = () => {
+        body.hidden = !body.hidden;
+        toggle.textContent = body.hidden ? "展开" : "收起";
+      };
+      header.append(title, toggle);
+      section.append(header, body);
+      return section;
+    }
+
     function renderAnswer(result) {
       const host = byId("answer");
       host.replaceChildren();
+      const body = document.createElement("div");
       const answer = document.createElement("div");
       answer.className = "answer-card";
       answer.textContent = result.answer || "未找到可用的匹配内容。";
-      host.append(answer);
-      if (!result.citations?.length) return;
-      const title = document.createElement("h3");
-      title.className = "result-title";
-      title.style.marginTop = "18px";
-      title.textContent = "检索结果";
+      body.append(answer);
+      if (!result.citations?.length) {
+        host.append(createCollapsibleResult("检索结果", body));
+        return;
+      }
       const citations = document.createElement("div");
       citations.className = "citation-list";
       for (const citation of result.citations) {
@@ -502,12 +531,14 @@
         item.append(quote, actions);
         citations.append(item);
       }
-      host.append(title, citations);
+      body.append(citations);
+      host.append(createCollapsibleResult("检索结果", body));
     }
 
     function renderFieldResults(groups) {
       const host = byId("field-results");
       host.replaceChildren();
+      const body = document.createElement("div");
       for (const group of groups) {
         const section = document.createElement("section");
         section.className = "field-group";
@@ -519,7 +550,7 @@
           empty.className = "empty";
           empty.textContent = "未找到匹配文件";
           section.append(empty);
-          host.append(section);
+          body.append(section);
           continue;
         }
         const list = document.createElement("div");
@@ -539,7 +570,7 @@
           detail.append(name, path);
           const occurrences = document.createElement("span");
           occurrences.className = "occurrence";
-          occurrences.textContent = `${file.occurrences} 处`;
+          occurrences.textContent = file.match_mode === "hybrid" ? "相关" : `${file.occurrences} 处`;
           top.append(detail, occurrences);
           const quote = document.createElement("div");
           quote.className = "quote";
@@ -553,8 +584,11 @@
           list.append(item);
         }
         section.append(list);
-        host.append(section);
+        body.append(section);
       }
+      const mode = groups[0]?.mode;
+      const title = mode === "hybrid" ? "混合模糊检索结果" : "精确字符串查找结果";
+      host.append(createCollapsibleResult(title, body));
     }
 
     async function ask(endpoint, button) {
@@ -651,18 +685,25 @@
       catch (error) { showToast(error.message, true); }
     };
 
-    byId("field-search-form").onsubmit = async (event) => {
-      event.preventDefault();
+    async function runFieldSearch(mode, button) {
       if (!selectedId()) { showToast("请先选择知识库", true); return; }
-      const button = event.currentTarget.querySelector("button");
       const fields = byId("fields").value.split("\n").map((value) => value.trim()).filter(Boolean);
       if (!fields.length) { showToast("请输入至少一个字段", true); return; }
       setBusy(button, true, "检索中…");
       try {
-        const groups = await request("/api/v1/field-search", { method: "POST", body: JSON.stringify({ knowledge_base_id: selectedId(), fields }) });
+        const groups = await request("/api/v1/field-search", { method: "POST", body: JSON.stringify({ knowledge_base_id: selectedId(), fields, mode }) });
         renderFieldResults(groups);
       } catch (error) { showToast(error.message, true); }
       finally { setBusy(button, false); }
+    }
+
+    byId("field-search-form").onsubmit = async (event) => {
+      event.preventDefault();
+      await runFieldSearch("exact", byId("field-exact-button"));
+    };
+
+    byId("field-hybrid-button").onclick = async () => {
+      await runFieldSearch("hybrid", byId("field-hybrid-button"));
     };
 
     byId("help-button").onclick = () => byId("help-dialog").showModal();

@@ -11,23 +11,38 @@ Each such case must have a human-checked question, relevant source path,
 evidence span, expected answer, and citation expectation. Automatically derived
 cases remain diagnostic candidates and must never be counted as T09 ground truth.
 
-## Build The Gold Set
+## Build The Current-Corpus Candidate Set
 
-The source-location Gold Benchmark reflects the product's primary workflow:
-find the file paths containing supplied fields. It uses 100 cases from distinct
-real documents with source paths and evidence saved for every case.
+The builder creates 100 source-location cases from the currently selected
+knowledge base. It may use several independently verified chunks from the same
+document when the corpus has fewer than 100 files. Every case stores the active
+document ID, chunk ID, path, page/section and evidence span. Generated cases are
+kept as `validated: false` until a human reviews every question.
 
 ```powershell
-E:\findfileagent\.venvs\findfileagent\Scripts\python.exe evaluation\build_gold_benchmark.py `
+python evaluation\build_gold_benchmark.py `
   --knowledge-base-id <knowledge-base-id>
 ```
 
-## Run
-
-From `E:\findfileagent\codex_agent_mvp`:
+Run the source-verified diagnostic retrieval benchmark, including Top-15:
 
 ```powershell
-E:\findfileagent\.venvs\findfileagent\Scripts\python.exe evaluation\run_all.py `
+python evaluation\run_retrieval_eval.py `
+  --knowledge-base-id <knowledge-base-id> `
+  --include-unvalidated `
+  --summary-output evaluation\results\retrieval_summary.json
+```
+
+These diagnostic scores must not be presented as an official T09 Gold score.
+After human review, change only genuinely reviewed cases to `validated: true`
+and rerun without `--include-unvalidated`.
+
+## Run
+
+From the repository root:
+
+```powershell
+python evaluation\run_all.py `
   --knowledge-base-id <knowledge-base-id>
 ```
 
@@ -37,7 +52,7 @@ written to `evaluation/report.md`.
 ## Optional One-Hour Soak
 
 ```powershell
-E:\findfileagent\.venvs\findfileagent\Scripts\python.exe evaluation\run_stability_eval.py `
+python evaluation\run_stability_eval.py `
   --knowledge-base-id <knowledge-base-id> --execute --duration-seconds 3600
 ```
 

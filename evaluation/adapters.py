@@ -14,7 +14,7 @@ def retrieve(
     payload = _request(
         base_url=base_url,
         path="/api/v1/search",
-        body={"knowledge_base_id": knowledge_base_id, "query": question},
+        body={"knowledge_base_id": knowledge_base_id, "query": question, "top_k": top_k},
     )
     return [
         {
