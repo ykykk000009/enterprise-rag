@@ -40,7 +40,8 @@ def _bundle_home() -> Path:
 
 
 def _configure_environment(home: Path) -> None:
-    bundled_models = _bundle_home() / "models" / "huggingface"
+    bundle = _bundle_home()
+    bundled_models = bundle / "models" / "huggingface"
     model_home = bundled_models if bundled_models.is_dir() else home / "models" / "huggingface"
     os.environ.setdefault("APP_ENV", "production")
     os.environ.setdefault("APP_DATA_DIR", str(home))
@@ -48,6 +49,27 @@ def _configure_environment(home: Path) -> None:
     os.environ.setdefault("QDRANT_PATH", str(home / "data" / "qdrant"))
     os.environ.setdefault("AUTHORIZED_ROOTS", str(home / "knowledge"))
     os.environ.setdefault("HUGGINGFACE_HOME", str(model_home))
+    offline_marker = bundle / "offline.mode"
+    embedding_model = bundle / "models" / "embedding-bge-small-zh-v1.5"
+    reranker_model = bundle / "models" / "reranker-bge-base-int8"
+    qwen_model = bundle / "models" / "qwen3" / "Qwen3-0.6B-Q8_0.gguf"
+    llama_cli = bundle / "tools" / "llama.cpp" / "llama-cli.exe"
+    bsdtar = bundle / "tools" / "libarchive" / "bsdtar.exe"
+    if offline_marker.is_file():
+        required = (embedding_model, reranker_model, qwen_model, llama_cli, bsdtar)
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise RuntimeError("离线完整版缺少必要资产：\n" + "\n".join(missing))
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("EMBEDDING_MODEL", str(embedding_model))
+        os.environ.setdefault("RERANKER_ENABLED", "true")
+        os.environ.setdefault("RERANKER_BACKEND", "onnx")
+        os.environ.setdefault("RERANKER_MODEL", str(reranker_model))
+        os.environ.setdefault("LLM_BACKEND", "qwen_gguf_cli")
+        os.environ.setdefault("LLM_MODEL_ID", str(qwen_model))
+        os.environ.setdefault("LLAMA_CLI_PATH", str(llama_cli))
+        os.environ.setdefault("BSDTAR_PATH", str(bsdtar))
     os.chdir(home)
 
 

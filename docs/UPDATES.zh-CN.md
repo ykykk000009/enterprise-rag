@@ -1,46 +1,50 @@
 # 软件更新与发布
 
-应用通过 GitHub 仓库 `ykykk000009/enterprise-rag` 的最新正式 Release 检查更新。
-启动检查在后台运行，每 24 小时最多执行一次；设置窗口也可以手动检查。
+应用通过 `ykykk000009/enterprise-rag` 的最新正式 GitHub Release 检查更新。启动检查
+异步执行，每 24 小时最多一次；网络失败不影响本地功能。
 
-## 发布新版本
+## 每个版本的 Release 文件
 
-1. 修改 `src/enterprise_document_rag/__init__.py` 中的 `__version__`，使用三段式版本号。
-2. 运行测试和 Windows 打包脚本：
+```text
+DocQA-vX.Y.Z-win-x64.zip
+DocQA-vX.Y.Z-win-x64.zip.sha256
+DocQA-vX.Y.Z-win-x64-offline.zip
+DocQA-vX.Y.Z-win-x64-offline.zip.sha256
+```
 
-   ```powershell
-   .\packaging\windows\build_windows.ps1
-   ```
+两个 ZIP 都是可首次安装的完整包。标准安装自动选择标准更新包；安装目录存在
+`offline.mode` 时自动选择离线更新包。GitHub Release 附件中不包含 `user-data`。
 
-3. 在 GitHub 创建标签为 `vX.Y.Z` 的正式 Release。
-4. 上传以下两个文件：
+## 发布步骤
 
-   ```text
-   DocQA-vX.Y.Z-win-x64.zip
-   DocQA-vX.Y.Z-win-x64.zip.sha256
-   ```
+1. 更新 `src/enterprise_document_rag/__init__.py` 中的三段式版本号。
+2. 更新 Release Notes、模型/索引/切块版本说明。
+3. 准备 `.offline-assets`。
+4. 运行双版本构建脚本。
+5. 检查隐私、许可证、文件清单、SHA-256 和离线启动。
+6. 提交并推送源码，创建 `vX.Y.Z` 标签和正式 Release。
+7. 上传四个附件，不要手工修改打包后的 ZIP。
 
-ZIP 内含主程序、独立更新器、依赖目录、前端资源、`portable.mode` 和
-`version.json`、当前版本的 `docqa.ico`，不含 `user-data`。主程序图标也会在
-打包时嵌入 `DocQA.exe`。不要手工修改打包后的文件，否则 GitHub
-附件 digest 和 `.sha256` 将无法通过双重校验。
+## 更新执行
 
-## 用户数据保护
+用户点击“立即更新”后：
 
-更新器从 Windows 临时目录运行，并执行以下操作：
+1. 下载与当前安装类型匹配的 ZIP；
+2. 同时验证 GitHub asset digest 和 `.sha256`；
+3. 备份 `user-data/data/agent.db`；
+4. 将独立 `Updater.exe` 复制到临时目录；
+5. 关闭主程序；
+6. 备份旧程序；离线更新同时备份旧模型和工具；
+7. 替换程序、图标和对应版本资产；
+8. 保留整个 `user-data`；
+9. 启动新版，失败则恢复旧程序、模型、工具和 SQLite。
 
-- 等待旧主程序退出；
-- 在 `user-data/updates/vX.Y.Z/rollback/program` 保存旧程序；
-- 备份 SQLite 到 `user-data/backups/agent-before-vX.Y.Z.db`；
-- 替换程序文件，但跳过 `user-data`、`portable.mode` 和旧版外置 `models`；
-- 替换 `DocQA.exe` 和 `docqa.ico` 后通知 Windows 刷新图标缓存；
-- 新版启动失败时恢复旧程序和 SQLite；
-- 日志写入 `user-data/updates/updater.log`。
+日志位于 `user-data/updates/updater.log`，回滚文件位于
+`user-data/updates/vX.Y.Z/rollback`。
 
-Qdrant、模型、知识库配置和授权目录不会被更新包覆盖。更换嵌入模型、切块规则
-或索引格式时，应在版本说明中明确要求用户重建向量索引。
+## 兼容性规则
 
-## 首次启用说明
-
-已经发布的 v0.1.0 安装包不含自动更新代码和 `Updater.exe`，因此该版本需要用户
-手动安装一次包含本功能的新版本。此后的版本可以在应用内完成更新。
+- 只更新页面、回答模型或普通功能：继续使用原 SQLite 和 Qdrant；
+- 更换向量模型、切块规则或索引格式：保留知识库和授权目录，只重建向量；
+- 更新程序图标：ZIP 中的 `docqa.ico` 与新 EXE 一起替换，并刷新 Windows 图标缓存；
+- `user-data` 永不进入 Release，也永不被更新器覆盖。

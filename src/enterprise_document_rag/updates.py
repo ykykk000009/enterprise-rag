@@ -80,11 +80,12 @@ def _version_key(value: str) -> tuple[int, int, int, tuple[tuple[int, int | str]
     return major, minor, patch, pre_key
 
 
-def parse_release(payload: dict[str, Any]) -> ReleaseInfo:
+def parse_release(payload: dict[str, Any], *, prefer_offline: bool = False) -> ReleaseInfo:
     tag_name = str(payload.get("tag_name") or "").strip()
     version = normalize_version(tag_name)
     assets = payload.get("assets") or []
-    expected_name = f"DocQA-v{version}-win-x64.zip"
+    suffix = "-win-x64-offline.zip" if prefer_offline else "-win-x64.zip"
+    expected_name = f"DocQA-v{version}{suffix}"
     zip_assets = [item for item in assets if str(item.get("name", "")).lower().endswith(".zip")]
     selected = next((item for item in zip_assets if item.get("name") == expected_name), None)
     if selected is None:
@@ -93,7 +94,7 @@ def parse_release(payload: dict[str, Any]) -> ReleaseInfo:
                 item
                 for item in zip_assets
                 if str(item.get("name", "")).startswith(("DocQA-", "EnterpriseDocumentRAG-"))
-                and str(item.get("name", "")).lower().endswith("-win-x64.zip")
+                and str(item.get("name", "")).lower().endswith(suffix)
             ),
             None,
         )
@@ -140,6 +141,10 @@ class UpdateService:
         self.state_path = self.updates_dir / "update-state.json"
         self._open = opener or urllib.request.urlopen
         self._now = now or (lambda: datetime.now(UTC))
+        executable_dir = Path(sys.executable).resolve().parent
+        self.prefer_offline = bool(getattr(sys, "frozen", False)) and (
+            executable_dir / "offline.mode"
+        ).is_file()
         self._lock = threading.RLock()
         self._worker: threading.Thread | None = None
         self._state = self._load_state()
@@ -153,6 +158,7 @@ class UpdateService:
                 "repository": self.repository,
                 "enabled": self.settings.update_enabled,
                 "install_supported": bool(getattr(sys, "frozen", False)),
+                "edition": "offline" if self.prefer_offline else "online",
             }
         )
         return result
@@ -345,7 +351,7 @@ class UpdateService:
             raise UpdateError(f"GitHub API 返回 HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise UpdateError("无法连接 GitHub，已保留当前版本") from exc
-        return parse_release(payload)
+        return parse_release(payload, prefer_offline=self.prefer_offline)
 
     def _fetch_checksum(self, url: str) -> str:
         try:

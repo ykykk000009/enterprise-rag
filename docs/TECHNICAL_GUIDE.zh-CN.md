@@ -1,103 +1,108 @@
-# 技术架构与大模型调用说明
+# 技术架构与模型说明
 
-## 1. 项目定位
+## 1. 定位
 
-本项目是单进程、本地优先的企业文档 RAG（检索增强生成）应用。它读取管理员明确授权的目录，增量解析和索引文档，然后为自然语言检索与问答提供可追溯引用。源文件只读，索引状态可以持久化并在重启后恢复。
+Document RAG 是单进程、本地优先的企业文档检索增强生成应用。它只读访问用户明确
+授权的目录，增量解析与索引文档，并提供可追溯到文件、压缩包成员、页码、章节和原文
+段落的检索与问答。
 
-## 2. 总体架构
+## 2. 架构
 
 ```text
-浏览器 / API 客户端
-        |
-     FastAPI
-        |
-        +-- 数据源扫描 -> 后台工作线程 -> 解析/OCR -> 分块 -> BGE 向量化
-        |                                      |          |
-        |                                   SQLite     Qdrant Local
-        |                                  元数据/FTS5    向量
-        |
-        +-- 查询 -> ACL/知识库过滤 -> 向量检索 + FTS5 -> 可选重排
-                                                       |
-                                                  本地 Qwen 生成
-                                                       |
-                                               答案 + 原文引用
+浏览器
+  -> FastAPI / Uvicorn
+     -> 知识库与多目录授权
+     -> 后台扫描任务
+        -> 文件解析 / OCR / 压缩包成员解析
+        -> 结构感知切块
+        -> SQLite WAL + FTS5
+        -> BGE Embedding + Qdrant Local
+
+查询
+  -> 知识库与文档范围过滤
+  -> FTS5 + BGE Dense Retrieval
+  -> Reciprocal Rank Fusion
+  -> 文档/内容去重
+  -> BGE Cross-Encoder Reranker
+  -> 命中块及连续前 2 / 后 2 块
+  -> Qwen3 生成
+  -> 通用证据审查、引用校验
 ```
 
-主要组件如下：
+| 层 | 实现 |
+|---|---|
+| Web/API | FastAPI、Uvicorn、原生 HTML/CSS/JavaScript |
+| 元数据/全文检索 | SQLite WAL、FTS5 |
+| 向量索引 | Qdrant Local |
+| 文档解析 | PyMuPDF、python-docx、openpyxl、xlrd、Office COM、libarchive |
+| OCR | RapidOCR、ONNX Runtime |
+| 向量 | `BAAI/bge-small-zh-v1.5` |
+| 重排 | `BAAI/bge-reranker-base` |
+| 回答 | `Qwen/Qwen3-0.6B` |
 
-| 层 | 实现 | 用途 |
+## 3. 检索和问答链路
+
+索引会把正文、文件名、规范化路径和压缩包内成员名共同写入可检索内容。文本按文档
+结构优先切分，并受 `420 tokens` 目标长度、`40 tokens` 重叠、`180-650 tokens`
+边界约束。表格按工作表、行和逻辑区域生成可引用文本。
+
+查询阶段同时执行：
+
+1. SQLite FTS5 关键词召回；
+2. BGE 向量语义召回；
+3. RRF 融合；
+4. 近重复内容和同一文档重复命中合并；
+5. BGE Cross-Encoder 对候选重新排序。
+
+“原文验证”直接展示检索证据。“提交问题”会为命中块补齐连续前后各两个块，再将核心
+证据交给 Qwen3；生成后执行证据完整性审查、引用编号修正和授权范围校验。证据不足时
+拒绝作答，不把模型常识伪装成文档结论。
+
+## 4. 在线版与离线版模型
+
+两种版本使用相同模型家族和检索策略：
+
+| 组件 | 标准在线版 | 离线完整版 |
 |---|---|---|
-| Web/API | FastAPI + Uvicorn | 页面、健康检查、知识库、数据源、索引、检索、问答 API |
-| 元数据与关键词检索 | SQLite（WAL、FTS5） | 文档、版本、任务、分块、ACL 范围与全文检索 |
-| 向量库 | Qdrant Local | 本地持久化语义向量 |
-| 文档解析 | PyMuPDF、python-docx、openpyxl、xlrd | PDF、DOCX、Excel、文本和 ZIP |
-| OCR | RapidOCR + ONNX Runtime | 扫描型 PDF 或低文本量文档图片识别 |
-| 向量模型 | `BAAI/bge-small-zh-v1.5` | 文档分块和查询向量化 |
-| 重排模型 | `BAAI/bge-reranker-base` | 可选，对混合检索候选重新排序 |
-| 生成模型 | `Qwen/Qwen2.5-0.5B-Instruct` | 基于检索证据生成带编号引用的答案 |
+| Embedding | 首次从 Hugging Face 下载 BGE | 内置 BGE safetensors |
+| Reranker | 首次下载 BGE CrossEncoder | 内置官方 ONNX 动态 INT8 转换 |
+| Qwen3 | Transformers 本地加载 | 官方 Q8_0 GGUF + llama.cpp |
+| 网络 | 首次使用需要 | 强制 `HF_HUB_OFFLINE=1` |
 
-## 3. 大模型/模型使用位置与 API Key
+离线量化是为了让程序、三套模型和工具保持在 GitHub 单 Release 附件 2 GB 上限内。
+模型来源、许可证、文件大小和 SHA-256 写在包内 `MODEL_MANIFEST.json`。
 
-| 位置 | 配置项 | 默认方式 | 是否需要 API Key | 是否必须 |
-|---|---|---|---|---|
-| 向量化 | `EMBEDDING_BACKEND=bge` | Sentence Transformers 在本机加载 BGE | 否 | 默认语义检索需要；可改为测试用 `hash` |
-| 答案生成 | `LLM_BACKEND=qwen_transformers` | Transformers 在本机加载 Qwen | 否 | 否；可改为 `extractive`，直接摘录证据 |
-| 检索重排 | `RERANKER_ENABLED=true` | CrossEncoder 在本机加载 BGE reranker | 否 | 否，默认关闭 |
-| OCR | `OCR_ENABLED=true` | RapidOCR/ONNX 本地推理 | 否 | 否，但扫描件通常需要 |
+项目不调用云端大模型 API，不读取商业模型 API Key。可将 `LLM_BACKEND` 改为
+`extractive` 关闭生成模型；此时仅摘录证据，资源占用更低，但归纳能力明显下降。
 
-结论：**当前代码没有调用云端大模型 API，也没有读取任何大模型 API Key。** 默认模型首次使用时会从 Hugging Face Hub 下载，因此首次部署通常需要互联网，但下载公开模型通常不要求 Hugging Face Token。若网络受限，可在可联网机器预下载模型目录，再将模型缓存复制到部署机并设置 `HUGGINGFACE_HOME`。对于受限/需授权模型，Hugging Face 可能要求 `HF_TOKEN`，但本项目的三个默认模型均不是通过商业推理 API 调用。
+## 5. 格式与解析边界
 
-若设置 `LLM_BACKEND=extractive`，问答只取最相关证据的首句，不加载 Qwen，资源占用和首次下载量会降低，但回答的归纳能力也会下降。
+支持 PDF、DOC/DOCX、PPT/PPTX、XLS/XLSX/XLSM、TXT、Markdown、ZIP、RAR、7Z、
+TAR 和 GZ。压缩包处理设有成员数、单成员大小、总解压大小和压缩比限制，并拒绝路径
+穿越。旧版 `.doc/.ppt` 在 Windows 上使用本机 Office 转换；不分发 Microsoft Office。
+离线版内置 BSD 许可的 libarchive `bsdtar` 用于 RAR/7Z。
 
-## 4. 数据处理链路
+## 6. 持久化与更新
 
-1. 用户创建知识库并登记数据源目录。
-2. 扫描器只遍历登记的数据源，按文件指纹判断新增、修改或删除。
-3. 后台线程逐文件解析；低文本量 PDF/DOCX 可触发 OCR。
-4. 文本按配置的长度和重叠窗口分块，写入 SQLite，并批量生成向量写入 Qdrant Local。
-5. 查询时先限定知识库和允许访问的文档，再合并向量召回与 FTS5 召回结果。
-6. 可选重排模型计算问题—段落相关性。
-7. 问答模块仅把检索证据交给本地 Qwen，并校验引用对应当前可见文档分块；证据不足时拒绝作答。
+所有用户状态位于 `user-data`：
 
-## 5. 支持格式与持久化目录
+- `data/agent.db`：知识库、文档、任务、分块和 FTS5；
+- `data/qdrant/`：向量索引；
+- `models/huggingface/`：标准版下载缓存；
+- `knowledge/`：可选本地资料目录；
+- `updates/` 与 `backups/`：更新包、日志和回滚数据。
 
-支持 `.pdf`、`.docx`、`.xlsx`、`.xlsm`、`.xls`、`.txt`、`.md` 和 `.zip`。ZIP 只读取受支持的内部文件，并带有成员数、单文件大小、总解压大小和压缩比限制。
+更新程序文件时永久保留 `user-data`。若模型、切块规则或向量索引版本改变，保留知识库
+和目录配置，只重建向量索引。
 
-默认持久化内容：
+## 7. 配置与安全
 
-- `data/agent.db`：SQLite 元数据、任务和 FTS5 索引；
-- `data/qdrant/`：Qdrant Local 向量数据；
-- `models/huggingface/`：模型缓存（配置 `HUGGINGFACE_HOME` 后）；
-- `knowledge/`：示例授权文档根目录，部署时应只读挂载。
+配置由 `pydantic-settings` 从环境变量或 `.env` 读取，默认仅监听 `127.0.0.1` 且
+Qdrant Local 只允许单进程访问。源码部署应保持 `--workers 1`。
 
-这些内容均不应提交到 GitHub。备份时应停止应用，或使用项目的 `scripts/backup.py`，确保 SQLite 与向量数据状态一致。
+当前版本面向本机单用户，没有完整的账号、租户和公网认证体系。不要直接暴露到公网。
+生产环境还需要反向代理 HTTPS、身份认证、目录白名单、最小权限账号、备份、磁盘监控
+和依赖漏洞管理。
 
-## 6. 关键配置
-
-配置由 `pydantic-settings` 从环境变量或 `.env` 读取。完整默认值见 `src/enterprise_document_rag/config.py`，常用项见 `.env.example`。
-
-特别注意：
-
-- `AUTHORIZED_ROOTS` 可填写逗号分隔的多个目录，但当前版本尚未在创建数据源接口中强制校验该白名单，见下方安全边界；
-- `DATABASE_URL` 当前应使用 SQLite URL；
-- `QDRANT_PATH` 必须是可持久化、可写目录；
-- CPU 是默认设备，可在具备兼容 PyTorch 环境时将模型设备改为 `cuda`；
-- 同一个 `data/qdrant` 目录不要由多个应用进程同时打开，所以生产启动也必须保持 `--workers 1`。
-
-## 7. API 概览
-
-- `GET /health/live`、`GET /health/ready`：存活和就绪检查；
-- `/api/v1/knowledge-bases`：知识库管理；
-- `/api/v1/sources`、`/api/v1/sources/{id}/scan`：数据源与扫描；
-- `/api/v1/documents`：索引状态、失败重试、重建和逻辑删除；
-- `POST /api/v1/search`：混合检索；
-- `POST /api/v1/query`：RAG 问答与引用；
-- `POST /api/v1/field-search`：字段在文档中的精确查找。
-
-启动后可在 `/docs` 查看 OpenAPI 交互文档。
-
-## 8. 当前边界与生产化建议
-
-这是 MVP：应用已有查询阶段的知识库/文档范围过滤，但没有完整的组织账号、登录、租户和反向代理认证。另一个重要边界是：`AUTHORIZED_ROOTS` 已定义在配置中，但 `POST /api/v1/sources` 当前只验证提交的路径是一个真实目录，并未验证它属于该白名单。也就是说，能够调用该接口的人可以登记应用进程有权读取的任意目录。
-
-因此不要直接裸露到公网。Docker 部署应只挂载明确授权的宿主机目录；源码部署应使用权限受限的专用系统账号。生产使用还应增加：根目录白名单强制校验、反向代理 HTTPS、身份认证、网络访问控制、定期备份、磁盘容量监控、日志采集和依赖漏洞更新。多实例横向扩展需要先把 Qdrant Local 替换为 Qdrant Server，并重新设计任务协调机制。
+第三方模型和二进制许可见
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。

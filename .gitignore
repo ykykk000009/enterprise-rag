@@ -22,6 +22,7 @@ build/
 .venv-package/
 .tmp-package/
 .pyinstaller-cache/
+.offline-assets/
 reports/
 evaluation/results/
 evaluation/dataset.jsonl

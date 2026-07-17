@@ -24,13 +24,16 @@ class Settings(BaseSettings):
     embedding_backend: str = "bge"
     embedding_device: str = "cpu"
     embedding_batch_size: int = Field(default=8, ge=1, le=64)
-    reranker_enabled: bool = False
+    reranker_enabled: bool = True
     reranker_backend: str = "bge"
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_device: str = "cpu"
     reranker_batch_size: int = Field(default=16, ge=1, le=64)
+    reranker_max_length: int = Field(default=512, ge=64, le=2048)
     llm_backend: str = "qwen_transformers"
     llm_model_id: str = "Qwen/Qwen3-0.6B"
+    llama_cli_path: Path | None = None
+    llm_context_size: int = Field(default=8192, ge=1024, le=32768)
     llm_max_new_tokens: int = Field(default=320, ge=32, le=512)
     huggingface_home: Path | None = None
     authorized_roots: str = "./knowledge"

@@ -1,7 +1,9 @@
 import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 from .config import Settings
@@ -162,9 +164,101 @@ class LocalQwenProvider:
         return self._model, self._tokenizer
 
 
+class LlamaCppQwenProvider(LocalQwenProvider):
+    """Qwen3 GGUF provider using the bundled llama.cpp command-line runtime."""
+
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        max_new_tokens: int,
+        cli_path: str,
+        context_size: int,
+    ) -> None:
+        super().__init__(model_id=model_id, max_new_tokens=max_new_tokens)
+        self.cli_path = cli_path
+        self.context_size = context_size
+
+    def _generate(self, messages: list[dict[str, str]]) -> str:
+        cli = Path(self.cli_path)
+        model = Path(self.model_id)
+        if not cli.is_file():
+            raise RuntimeError(f"llama.cpp executable does not exist: {cli}")
+        if not model.is_file():
+            raise RuntimeError(f"Qwen3 GGUF model does not exist: {model}")
+        system_prompt, prompt = _llama_cli_prompts(messages)
+        completed = subprocess.run(
+            [
+                str(cli),
+                "-m",
+                str(model),
+                "-sys",
+                system_prompt,
+                "-p",
+                prompt,
+                "-n",
+                str(self.max_new_tokens),
+                "-c",
+                str(self.context_size),
+                "--temp",
+                "0",
+                "--no-display-prompt",
+                "--single-turn",
+                "--simple-io",
+                "--no-warmup",
+            ],
+            cwd=cli.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
+        return _extract_llama_cli_answer(completed.stdout, prompt=prompt)
+
+
+def _llama_cli_prompts(messages: list[dict[str, str]]) -> tuple[str, str]:
+    system_prompt = "\n\n".join(
+        message["content"].strip()
+        for message in messages
+        if message["role"] == "system"
+    )
+    prompt = "\n\n".join(
+        message["content"].strip()
+        for message in messages
+        if message["role"] != "system"
+    )
+    return system_prompt, f"{prompt}\n/no_think"
+
+
+def _extract_llama_cli_answer(output: str, *, prompt: str) -> str:
+    prompt_marker = f"\n> {prompt}\n"
+    if prompt_marker in output:
+        output = output.split(prompt_marker, maxsplit=1)[1]
+    output = re.split(r"\n+\[ Prompt:", output, maxsplit=1)[0]
+    output = re.sub(r"\n+Exiting\.\.\.\s*$", "", output)
+    return output.strip()
+
+
 @lru_cache
 def _qwen_provider(model_id: str, max_new_tokens: int) -> LocalQwenProvider:
     return LocalQwenProvider(model_id=model_id, max_new_tokens=max_new_tokens)
+
+
+@lru_cache
+def _llama_cpp_qwen_provider(
+    model_id: str,
+    max_new_tokens: int,
+    cli_path: str,
+    context_size: int,
+) -> LlamaCppQwenProvider:
+    return LlamaCppQwenProvider(
+        model_id=model_id,
+        max_new_tokens=max_new_tokens,
+        cli_path=cli_path,
+        context_size=context_size,
+    )
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
@@ -172,6 +266,15 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
         return ExtractiveLLMProvider()
     if settings.llm_backend == "qwen_transformers":
         return _qwen_provider(settings.llm_model_id, settings.llm_max_new_tokens)
+    if settings.llm_backend == "qwen_gguf_cli":
+        if settings.llama_cli_path is None:
+            raise ValueError("LLAMA_CLI_PATH is required for qwen_gguf_cli")
+        return _llama_cpp_qwen_provider(
+            settings.llm_model_id,
+            settings.llm_max_new_tokens,
+            str(settings.llama_cli_path),
+            settings.llm_context_size,
+        )
     raise ValueError(f"unsupported LLM backend: {settings.llm_backend}")
 
 

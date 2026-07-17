@@ -793,7 +793,7 @@ def parse_external_archive(
 
 def _find_bsdtar() -> str:
     configured = os.environ.get("BSDTAR_PATH")
-    candidate = configured or shutil.which("bsdtar")
+    candidate = configured or shutil.which("bsdtar") or shutil.which("tar")
     if candidate is None:
         raise ValueError("RAR and 7z parsing requires a local bsdtar executable")
     return candidate

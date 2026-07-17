@@ -14,7 +14,14 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-RESERVED_NAMES = {"user-data", "portable.mode", "models"}
+ALWAYS_RESERVED_NAMES = {"user-data", "portable.mode"}
+OFFLINE_ASSET_NAMES = {
+    "models",
+    "tools",
+    "licenses",
+    "offline.mode",
+    "third_party_notices.md",
+}
 
 
 def _arguments() -> argparse.Namespace:
@@ -90,11 +97,19 @@ def _refresh_shell_icons() -> None:
     ctypes.windll.shell32.SHChangeNotify(shell_change_associated, 0, None, None)
 
 
-def _move_existing_to_backup(install_dir: Path, backup_dir: Path) -> list[str]:
+def _move_existing_to_backup(
+    install_dir: Path,
+    backup_dir: Path,
+    *,
+    replace_offline_assets: bool,
+) -> list[str]:
     moved: list[str] = []
     backup_dir.mkdir(parents=True, exist_ok=True)
     for item in install_dir.iterdir():
-        if item.name.lower() in RESERVED_NAMES:
+        item_name = item.name.lower()
+        if item_name in ALWAYS_RESERVED_NAMES:
+            continue
+        if not replace_offline_assets and item_name in OFFLINE_ASSET_NAMES:
             continue
         destination = backup_dir / item.name
         if destination.exists():
@@ -104,10 +119,18 @@ def _move_existing_to_backup(install_dir: Path, backup_dir: Path) -> list[str]:
     return moved
 
 
-def _copy_payload(payload: Path, install_dir: Path) -> list[str]:
+def _copy_payload(
+    payload: Path,
+    install_dir: Path,
+    *,
+    replace_offline_assets: bool,
+) -> list[str]:
     copied: list[str] = []
     for item in payload.iterdir():
-        if item.name.lower() in {"user-data", "models"}:
+        item_name = item.name.lower()
+        if item_name == "user-data":
+            continue
+        if not replace_offline_assets and item_name in OFFLINE_ASSET_NAMES:
             continue
         destination = install_dir / item.name
         if item.name.lower() == "portable.mode" and destination.exists():
@@ -135,10 +158,11 @@ def _rollback(
     copied: list[str],
     database: Path,
     database_backup: Path | None,
+    replace_offline_assets: bool,
 ) -> None:
     for name in copied:
         target = install_dir / name
-        if target.name.lower() not in RESERVED_NAMES and target.exists():
+        if target.name.lower() not in ALWAYS_RESERVED_NAMES and target.exists():
             _remove(target)
     for item in backup_dir.iterdir():
         destination = install_dir / item.name
@@ -182,6 +206,7 @@ def run() -> int:
     backup_dir = update_root / "rollback" / "program"
     log_path = install_dir / "user-data" / "updates" / "updater.log"
     copied: list[str] = []
+    replace_offline_assets = False
     try:
         _log(log_path, f"开始更新到 v{args.version}")
         _wait_for_exit(args.pid)
@@ -191,8 +216,17 @@ def run() -> int:
         _safe_extract(package, extract_dir)
         payload = _payload_root(extract_dir, args.executable)
         _validate_payload(payload, args.executable)
-        _move_existing_to_backup(install_dir, backup_dir)
-        copied = _copy_payload(payload, install_dir)
+        replace_offline_assets = (payload / "offline.mode").is_file()
+        _move_existing_to_backup(
+            install_dir,
+            backup_dir,
+            replace_offline_assets=replace_offline_assets,
+        )
+        copied = _copy_payload(
+            payload,
+            install_dir,
+            replace_offline_assets=replace_offline_assets,
+        )
         executable = install_dir / args.executable
         if not executable.is_file():
             raise RuntimeError("替换后主程序不存在")
@@ -217,7 +251,14 @@ def run() -> int:
         _log(log_path, f"更新失败：{exc}")
         try:
             if backup_dir.is_dir():
-                _rollback(install_dir, backup_dir, copied, database, database_backup)
+                _rollback(
+                    install_dir,
+                    backup_dir,
+                    copied,
+                    database,
+                    database_backup,
+                    replace_offline_assets=replace_offline_assets,
+                )
                 old_executable = install_dir / args.executable
                 if old_executable.is_file():
                     _refresh_shell_icons()
