@@ -25,6 +25,26 @@
 适用于 Windows 10/11 x64，无需安装 Python或申请大模型 API Key。程序只监听本机
 `127.0.0.1`。扫描型 PDF 和 Office 文档 OCR 会比普通文本解析慢。
 
+## 校验 SHA-256
+
+把 ZIP 和同名 `.sha256` 文件下载到同一目录。在该目录打开 PowerShell，例如校验
+标准在线版：
+
+```powershell
+$zip = "DocQA-v0.2.2-win-x64.zip"
+$expected = (Get-Content "$zip.sha256").Split()[0].ToLower()
+$actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+$actual
+$actual -eq $expected
+```
+
+最后一行返回 `True` 才说明下载文件与发布文件完全一致。离线完整版只需把 `$zip`
+改为 `DocQA-v0.2.2-win-x64-offline.zip`。如果返回 `False`，请删除 ZIP 后重新下载，
+不要运行或解压该文件。
+
+应用内“立即更新”会自动校验 GitHub 提供的 digest 和 `.sha256`，用户无需手工执行
+上述命令；手工校验主要用于首次下载安装。
+
 ## 文件和数据
 
 ```text
