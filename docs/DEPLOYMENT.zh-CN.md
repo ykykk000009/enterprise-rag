@@ -3,7 +3,7 @@
 ## 源码运行
 
 ```powershell
-git clone https://github.com/ykykk000009/enterprise-rag.git
+git clone https://github.com/ykykk000009/DocQA-APP.git
 cd enterprise-rag
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

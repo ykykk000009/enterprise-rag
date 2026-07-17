@@ -206,6 +206,7 @@ class LlamaCppQwenProvider(LocalQwenProvider):
                 "--single-turn",
                 "--simple-io",
                 "--no-warmup",
+                "--no-perf",
             ],
             cwd=cli.parent,
             check=True,
@@ -233,12 +234,27 @@ def _llama_cli_prompts(messages: list[dict[str, str]]) -> tuple[str, str]:
 
 
 def _extract_llama_cli_answer(output: str, *, prompt: str) -> str:
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.replace("\r\n", "\n"))
     prompt_marker = f"\n> {prompt}\n"
     if prompt_marker in output:
         output = output.split(prompt_marker, maxsplit=1)[1]
+    else:
+        # llama-cli may wrap or normalize a long prompt before echoing it. The
+        # stable suffix is the Qwen control line immediately before generation.
+        control_line = "\n/no_think\n"
+        if control_line in output:
+            output = output.rsplit(control_line, maxsplit=1)[1]
+        else:
+            first_prompt_line = next(
+                (line.strip() for line in prompt.splitlines() if line.strip()), ""
+            )
+            if first_prompt_line:
+                short_marker = f"\n> {first_prompt_line}\n"
+                if short_marker in output:
+                    output = output.split(short_marker, maxsplit=1)[1]
     output = re.split(r"\n+\[ Prompt:", output, maxsplit=1)[0]
     output = re.sub(r"\n+Exiting\.\.\.\s*$", "", output)
-    return output.strip()
+    return output.removeprefix("/no_think\n").strip()
 
 
 @lru_cache

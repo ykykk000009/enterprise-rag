@@ -1,6 +1,6 @@
 # 软件更新与发布
 
-应用通过 `ykykk000009/enterprise-rag` 的最新正式 GitHub Release 检查更新。启动检查
+应用通过 `ykykk000009/DocQA-APP` 的最新正式 GitHub Release 检查更新。启动检查
 异步执行，每 24 小时最多一次；网络失败不影响本地功能。
 
 ## 每个版本的 Release 文件

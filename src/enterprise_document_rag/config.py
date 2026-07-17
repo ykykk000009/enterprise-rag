@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     graph_rag_enabled: bool = False
     app_data_dir: Path | None = None
     update_enabled: bool = True
-    update_repository: str = "ykykk000009/enterprise-rag"
+    update_repository: str = "ykykk000009/DocQA-APP"
     update_check_interval_hours: int = Field(default=24, ge=1, le=168)
     update_request_timeout_seconds: int = Field(default=15, ge=3, le=120)
 

@@ -2,7 +2,7 @@
 
 ## 选择版本
 
-从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest)
+从 [GitHub Releases](https://github.com/ykykk000009/DocQA-APP/releases/latest)
 下载以下任一完整包：
 
 | 版本 | 文件名 | 是否需要联网 |
@@ -31,7 +31,7 @@
 标准在线版：
 
 ```powershell
-$zip = "DocQA-v0.2.2-win-x64.zip"
+$zip = "DocQA-v0.2.3-win-x64.zip"
 $expected = (Get-Content "$zip.sha256").Split()[0].ToLower()
 $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 $actual
@@ -39,7 +39,7 @@ $actual -eq $expected
 ```
 
 最后一行返回 `True` 才说明下载文件与发布文件完全一致。离线完整版只需把 `$zip`
-改为 `DocQA-v0.2.2-win-x64-offline.zip`。如果返回 `False`，请删除 ZIP 后重新下载，
+改为 `DocQA-v0.2.3-win-x64-offline.zip`。如果返回 `False`，请删除 ZIP 后重新下载，
 不要运行或解压该文件。
 
 应用内“立即更新”会自动校验 GitHub 提供的 digest 和 `.sha256`，用户无需手工执行

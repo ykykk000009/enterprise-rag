@@ -19,7 +19,7 @@
 | 标准在线版 | `DocQA-vX.Y.Z-win-x64.zip` | 包体较小；首次索引或问答时下载 BGE、Reranker 和 Qwen3，之后可离线使用 |
 | 离线完整版 | `DocQA-vX.Y.Z-win-x64-offline.zip` | 内置 BGE、INT8 Reranker、Qwen3 Q8 GGUF、llama.cpp 和 libarchive；解压后无需联网 |
 
-从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest)
+从 [GitHub Releases](https://github.com/ykykk000009/DocQA-APP/releases/latest)
 下载对应 ZIP，完整解压后双击 `DocQA.exe`。
 
 详见 [Windows 下载安装说明](docs/INSTALL_WINDOWS.zh-CN.md)。
@@ -68,7 +68,7 @@
 要求 Python 3.11 或 3.12。
 
 ```powershell
-git clone https://github.com/ykykk000009/enterprise-rag.git
+git clone https://github.com/ykykk000009/DocQA-APP.git
 cd enterprise-rag
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

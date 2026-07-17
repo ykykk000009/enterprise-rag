@@ -2,6 +2,6 @@
 
 __all__ = ["__version__"]
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
-GITHUB_REPOSITORY = "ykykk000009/enterprise-rag"
+GITHUB_REPOSITORY = "ykykk000009/DocQA-APP"
