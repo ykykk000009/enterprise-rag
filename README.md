@@ -16,10 +16,7 @@
 | 离线完整版 | `DocQA-vX.Y.Z-win-x64-offline.zip` | 内置 BGE、INT8 Reranker、Qwen3 Q8 GGUF、llama.cpp 和 libarchive；解压后无需联网 |
 
 从 [GitHub Releases](https://github.com/ykykk000009/enterprise-rag/releases/latest)
-下载对应 ZIP，完整解压后双击 `DocQA.exe`。无需安装 Python。
-
-> 两个包都是首次安装可用的完整程序，不是增量补丁。发布包不包含 `user-data`，
-> 因此不会携带开发者或其他用户的文档、数据库和模型缓存。
+下载对应 ZIP，完整解压后双击 `DocQA.exe`。
 
 详见 [Windows 下载安装说明](docs/INSTALL_WINDOWS.zh-CN.md)。
 
