@@ -11,6 +11,7 @@ from . import __version__
 from .config import Settings, configure_huggingface_cache, get_settings
 from .db import initialize_sqlite, sqlite_connection, sqlite_health
 from .embeddings import build_embedding_provider
+from .model_manager import QwenModelManager
 from .operations import IngestionService
 from .preview import render_document_preview
 from .qa import RAGAnswerer, build_llm_provider
@@ -83,6 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker = IngestionWorker(settings=app_settings)
         app.state.ingestion_worker = worker
         worker.start()
+        app.state.qwen_model_manager.start_auto_download()
         app.state.update_service.start_background_check()
         try:
             yield
@@ -97,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = app_settings
     app.state.update_service = UpdateService(app_settings)
+    app.state.qwen_model_manager = QwenModelManager(app_settings)
     app.state.shutdown_callback = None
 
     @app.get("/")
@@ -111,6 +114,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ready() -> dict[str, bool | str]:
         initialize_sqlite(app_settings)
         return sqlite_health(app_settings)
+
+    @app.get("/api/v1/models/qwen3/status")
+    def qwen_model_status() -> dict[str, object]:
+        return app.state.qwen_model_manager.status()
+
+    @app.post("/api/v1/models/qwen3/download")
+    def download_qwen_model() -> dict[str, object]:
+        return app.state.qwen_model_manager.start_download()
 
     @app.get("/api/v1/updates/status")
     def update_status() -> dict[str, object]:
@@ -441,6 +452,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/query")
     def query(request: QueryRequest) -> dict[str, object]:
+        model_missing = (
+            app_settings.llm_backend == "qwen_transformers"
+            and not app.state.qwen_model_manager.is_ready()
+        )
+        if model_missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "\u56de\u7b54\u6a21\u578b Qwen3-0.6B \u5c1a\u672a\u4e0b\u8f7d\u5b8c\u6210\uff0c"
+                    "\u8bf7\u7b49\u5f85\u9996\u6b21\u4e0b\u8f7d\u6216\u91cd\u8bd5"
+                ),
+            )
         with sqlite_connection(app_settings) as connection:
             retriever = _retriever(connection=connection, settings=app_settings)
             answer = RAGAnswerer(

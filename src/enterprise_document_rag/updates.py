@@ -88,6 +88,13 @@ def parse_release(payload: dict[str, Any], *, prefer_offline: bool = False) -> R
     expected_name = f"DocQA-v{version}{suffix}"
     zip_assets = [item for item in assets if str(item.get("name", "")).lower().endswith(".zip")]
     selected = next((item for item in zip_assets if item.get("name") == expected_name), None)
+    if selected is None and prefer_offline:
+        # A newer release may intentionally publish only the Transformers online
+        # package. Older offline editions can still update to that package and
+        # download Qwen3 on first launch.
+        standard_name = f"DocQA-v{version}-win-x64.zip"
+        selected = next((item for item in zip_assets if item.get("name") == standard_name), None)
+        suffix = "-win-x64.zip"
     if selected is None:
         selected = next(
             (

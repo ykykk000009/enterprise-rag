@@ -50,8 +50,10 @@ def _configure_environment(home: Path) -> None:
     os.environ.setdefault("AUTHORIZED_ROOTS", str(home / "knowledge"))
     os.environ.setdefault("HUGGINGFACE_HOME", str(model_home))
     offline_marker = bundle / "offline.mode"
+    online_models_marker = bundle / "online-models.mode"
     embedding_model = bundle / "models" / "embedding-bge-small-zh-v1.5"
     reranker_model = bundle / "models" / "reranker-bge-base-int8"
+    online_reranker_model = bundle / "models" / "reranker-bge-base"
     qwen_model = bundle / "models" / "qwen3" / "Qwen3-0.6B-Q8_0.gguf"
     llama_cli = bundle / "tools" / "llama.cpp" / "llama-cli.exe"
     bsdtar = bundle / "tools" / "libarchive" / "bsdtar.exe"
@@ -70,6 +72,20 @@ def _configure_environment(home: Path) -> None:
         os.environ.setdefault("LLM_MODEL_ID", str(qwen_model))
         os.environ.setdefault("LLAMA_CLI_PATH", str(llama_cli))
         os.environ.setdefault("BSDTAR_PATH", str(bsdtar))
+    elif online_models_marker.is_file():
+        required = (embedding_model, online_reranker_model)
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise RuntimeError(
+                "Online model package is missing bundled model assets:\n" + "\n".join(missing)
+            )
+        os.environ.setdefault("EMBEDDING_MODEL", str(embedding_model))
+        os.environ.setdefault("RERANKER_ENABLED", "true")
+        os.environ.setdefault("RERANKER_BACKEND", "bge")
+        os.environ.setdefault("RERANKER_MODEL", str(online_reranker_model))
+        os.environ.setdefault("LLM_BACKEND", "qwen_transformers")
+        os.environ.setdefault("LLM_MODEL_ID", "Qwen/Qwen3-0.6B")
+        os.environ.setdefault("MODEL_AUTO_DOWNLOAD", "true")
     os.chdir(home)
 
 

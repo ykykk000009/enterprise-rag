@@ -87,6 +87,12 @@
     .update-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
     .text-button { min-height: 32px; padding: 0 5px; border: 0; color: var(--muted); background: transparent; font-size: 13px; }
     .text-button:hover { color: var(--text); }
+    .model-banner { display: none; border-bottom: 1px solid #f1d6a8; background: var(--amber-soft); }
+    .model-banner.visible { display: block; }
+    .model-banner-inner { width: min(100%, 1600px); min-height: 62px; margin: 0 auto; padding: 11px 48px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .model-summary { min-width: 0; }
+    .model-title { font-size: 14px; font-weight: 800; }
+    .model-notes { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 
     main { width: min(100%, 1600px); margin: 0 auto; padding: 18px 48px 48px; }
     .workspace-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(460px, 1fr); gap: 16px; }
@@ -189,6 +195,7 @@
     @media (max-width: 900px) {
       .topbar { padding: 0 20px; }
       .update-banner-inner { padding: 12px 20px; }
+      .model-banner-inner { padding: 11px 20px; }
       main { padding: 16px 20px 36px; }
       .workspace-grid { grid-template-columns: 1fr; }
       .brand { gap: 12px; }
@@ -197,6 +204,7 @@
     @media (max-width: 620px) {
       .topbar { min-height: 62px; padding: 0 14px; }
       .update-banner-inner { align-items: stretch; flex-direction: column; gap: 10px; padding: 12px 14px; }
+      .model-banner-inner { align-items: stretch; flex-direction: column; gap: 10px; padding: 11px 14px; }
       .update-actions { flex-wrap: wrap; }
       .brand-name { font-size: 18px; }
       .health { display: none; }
@@ -234,6 +242,16 @@
         <button id="update-later" class="text-button" type="button">稍后提醒</button>
         <button id="update-skip" class="text-button" type="button">跳过此版本</button>
       </div>
+    </div>
+  </section>
+
+  <section id="model-banner" class="model-banner" aria-live="polite">
+    <div class="model-banner-inner">
+      <div class="model-summary">
+        <div id="model-title" class="model-title">回答模型</div>
+        <div id="model-notes" class="model-notes"></div>
+      </div>
+      <button id="model-download-button" class="button compact" type="button">下载回答模型</button>
     </div>
   </section>
 
@@ -320,7 +338,7 @@
   </dialog>
 
   <script>
-    const state = { knowledgeBases: [], selectedKnowledgeBaseId: "", toastTimer: null, refreshing: false, update: null, updatePollTimer: null, announcedVersion: "" };
+    const state = { knowledgeBases: [], selectedKnowledgeBaseId: "", toastTimer: null, refreshing: false, update: null, updatePollTimer: null, modelPollTimer: null, announcedVersion: "" };
     const byId = (id) => document.getElementById(id);
     const selectedId = () => byId("knowledge-base-select").value;
     const patterns = (value) => value.split(";").map((item) => item.trim()).filter(Boolean);
@@ -420,6 +438,37 @@
         state.updatePollTimer = window.setTimeout(refreshUpdateStatus, 1200);
       }
       return update;
+    }
+
+    function renderQwenModel(status) {
+      const banner = byId("model-banner");
+      const ready = status.state === "ready";
+      banner.classList.toggle("visible", !ready);
+      if (ready) return;
+      const downloading = status.state === "downloading";
+      const failed = status.state === "error";
+      byId("model-title").textContent = failed ? "回答模型下载失败" : (downloading ? "正在下载回答模型" : "回答模型尚未安装");
+      const total = Number(status.total_bytes || 0);
+      const downloaded = Number(status.downloaded_bytes || 0);
+      byId("model-notes").textContent = failed
+        ? `${status.error || "下载失败"}。模型地址：${status.download_url}`
+        : (downloading
+          ? `Qwen/Qwen3-0.6B：${formatBytes(downloaded)}${total ? ` / ${formatBytes(total)}` : ""}`
+          : `首次使用需要下载 Qwen/Qwen3-0.6B。保存位置：${status.storage_path}`);
+      const button = byId("model-download-button");
+      button.hidden = false;
+      button.disabled = downloading;
+      button.textContent = downloading ? "正在下载…" : (failed ? "重试下载" : "下载回答模型");
+    }
+
+    async function refreshQwenModelStatus() {
+      const status = await request("/api/v1/models/qwen3/status");
+      renderQwenModel(status);
+      window.clearTimeout(state.modelPollTimer);
+      if (status.state === "downloading") {
+        state.modelPollTimer = window.setTimeout(refreshQwenModelStatus, 1000);
+      }
+      return status;
     }
 
     function statusBadge(scanState) {
@@ -821,6 +870,18 @@
       await runFieldSearch("hybrid", byId("field-hybrid-button"));
     };
 
+    byId("model-download-button").onclick = async () => {
+      const button = byId("model-download-button");
+      setBusy(button, true, "正在准备下载…");
+      try {
+        renderQwenModel(await request("/api/v1/models/qwen3/download", { method: "POST" }));
+        await refreshQwenModelStatus();
+      } catch (error) {
+        showToast(error.message, true);
+        setBusy(button, false);
+      }
+    };
+
     byId("help-button").onclick = () => byId("help-dialog").showModal();
     byId("settings-button").onclick = async () => {
       byId("settings-dialog").showModal();
@@ -886,7 +947,7 @@
       try {
         const health = await request("/health/ready");
         setHealth(health.ok ? "服务正常" : "服务异常", health.ok ? "ready" : "error");
-        await Promise.all([refreshAll(), refreshUpdateStatus()]);
+        await Promise.all([refreshAll(), refreshUpdateStatus(), refreshQwenModelStatus()]);
       } catch (error) {
         setHealth("服务不可用", "error");
         showToast(error.message, true);

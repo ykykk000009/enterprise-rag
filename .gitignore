@@ -23,6 +23,7 @@ build/
 .tmp-package/
 .pyinstaller-cache/
 .offline-assets/
+.online-assets/
 reports/
 evaluation/results/
 evaluation/dataset.jsonl

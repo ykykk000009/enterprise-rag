@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     llm_context_size: int = Field(default=8192, ge=1024, le=32768)
     llm_max_new_tokens: int = Field(default=320, ge=32, le=512)
     huggingface_home: Path | None = None
+    model_download_repository: str = "Qwen/Qwen3-0.6B"
+    model_auto_download: bool = False
     authorized_roots: str = "./knowledge"
     chunk_size_tokens: int = Field(default=420, ge=1)
     chunk_overlap_tokens: int = Field(default=40, ge=0)

@@ -1,6 +1,8 @@
 param(
     [string]$OfflineAssetsPath = ".offline-assets",
+    [string]$OnlineModelAssetsPath = ".online-assets",
     [switch]$OnlineOnly,
+    [switch]$OnlineModels,
     [string]$BootstrapPython = "python"
 )
 
@@ -60,6 +62,7 @@ if (-not (Test-Path $Python)) {
     --workpath (Join-Path $ProjectRoot "build\pyinstaller") `
     --specpath (Join-Path $ProjectRoot "build") `
     --collect-all enterprise_document_rag `
+    --collect-all huggingface_hub `
     --collect-all sentence_transformers `
     --collect-all transformers `
     --collect-all rapidocr_onnxruntime `
@@ -99,6 +102,8 @@ function Write-VersionMetadata([string]$Edition) {
         embedding_model = "BAAI/bge-small-zh-v1.5"
         reranker_model = "BAAI/bge-reranker-base"
         answer_model = "Qwen/Qwen3-0.6B"
+        qwen_download_required = ($Edition -eq "online-models")
+        qwen_download_url = "https://huggingface.co/Qwen/Qwen3-0.6B"
         chunking_rule_version = "token-aware-v1"
         vector_index_version = "v1"
     } | ConvertTo-Json
@@ -122,6 +127,29 @@ function Write-ZipPackage([string]$ZipName) {
 }
 
 Write-VersionMetadata "online"
+
+if ($OnlineModels) {
+    $ResolvedOnlineAssets = (Resolve-Path $OnlineModelAssetsPath).Path
+    $RequiredOnlineAssets = @(
+        "models\embedding-bge-small-zh-v1.5\model.safetensors",
+        "models\reranker-bge-base\model.safetensors",
+        "licenses",
+        "MODEL_MANIFEST.json"
+    )
+    foreach ($RequiredAsset in $RequiredOnlineAssets) {
+        if (-not (Test-Path (Join-Path $ResolvedOnlineAssets $RequiredAsset))) {
+            throw "Online model asset is missing: $RequiredAsset"
+        }
+    }
+    Copy-Item (Join-Path $ResolvedOnlineAssets "models") $AppDir -Recurse -Force
+    Copy-Item (Join-Path $ResolvedOnlineAssets "licenses") $AppDir -Recurse -Force
+    Copy-Item (Join-Path $ResolvedOnlineAssets "MODEL_MANIFEST.json") $AppDir -Force
+    Set-Content -LiteralPath (Join-Path $AppDir "online-models.mode") -Value "transformers" -Encoding ASCII
+    Write-VersionMetadata "online-models"
+    Write-ZipPackage "DocQA-v$Version-win-x64.zip"
+    exit 0
+}
+
 Write-ZipPackage "DocQA-v$Version-win-x64.zip"
 
 if (-not $OnlineOnly) {
