@@ -355,11 +355,82 @@ class UpdateService:
             if exc.code == 404:
                 raise UpdateError("GitHub 仓库尚未发布正式 Release") from exc
             if exc.code == 403:
+                return self._fetch_latest_release_from_page()
                 raise UpdateError("GitHub API 请求受限，请稍后重试") from exc
             raise UpdateError(f"GitHub API 返回 HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise UpdateError("无法连接 GitHub，已保留当前版本") from exc
         return parse_release(payload, prefer_offline=self.prefer_offline)
+
+    def _fetch_latest_release_from_page(self) -> ReleaseInfo:
+        """Resolve the latest release without consuming the GitHub API quota."""
+        page_url = f"https://github.com/{self.repository}/releases/latest"
+        request = urllib.request.Request(
+            page_url,
+            headers={"Accept": "text/html", "User-Agent": f"DocQA/{self.current_version}"},
+        )
+        try:
+            with self._open(request, timeout=self.settings.update_request_timeout_seconds) as response:
+                final_url = str(response.geturl())
+        except (urllib.error.URLError, TimeoutError, AttributeError) as exc:
+            raise UpdateError("GitHub API 受限，且无法读取 Release 页面") from exc
+
+        match = re.search(
+            r"/releases/tag/(?P<tag>v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?)",
+            final_url,
+        )
+        if match is None:
+            raise UpdateError("无法从 GitHub Release 页面识别版本号")
+
+        tag_name = match.group("tag")
+        version = normalize_version(tag_name)
+        names = [
+            f"DocQA-v{version}-win-x64-offline.zip",
+            f"DocQA-v{version}-win-x64.zip",
+        ]
+        if not self.prefer_offline:
+            names.reverse()
+        selected_name = next(
+            (name for name in names if self._release_asset_exists(name)),
+            None,
+        )
+        if selected_name is None:
+            raise UpdateError("最新 Release 没有可用的 Windows 更新包")
+
+        download_url = (
+            f"https://github.com/{self.repository}/releases/latest/download/{selected_name}"
+        )
+        return ReleaseInfo(
+            version=version,
+            tag_name=tag_name,
+            notes="",
+            html_url=final_url,
+            published_at=None,
+            asset=ReleaseAsset(
+                name=selected_name,
+                download_url=download_url,
+                size=0,
+                sha256=None,
+            ),
+            checksum_url=f"{download_url}.sha256",
+        )
+
+    def _release_asset_exists(self, name: str) -> bool:
+        url = f"https://github.com/{self.repository}/releases/latest/download/{name}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/octet-stream",
+                "Range": "bytes=0-0",
+                "User-Agent": f"DocQA/{self.current_version}",
+            },
+        )
+        try:
+            with self._open(request, timeout=self.settings.update_request_timeout_seconds) as response:
+                response.read(1)
+            return True
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+            return False
 
     def _fetch_checksum(self, url: str) -> str:
         try:
