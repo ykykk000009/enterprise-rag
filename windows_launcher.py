@@ -57,7 +57,21 @@ def _configure_environment(home: Path) -> None:
     qwen_model = bundle / "models" / "qwen3" / "Qwen3-0.6B-Q8_0.gguf"
     llama_cli = bundle / "tools" / "llama.cpp" / "llama-cli.exe"
     bsdtar = bundle / "tools" / "libarchive" / "bsdtar.exe"
-    if offline_marker.is_file():
+    # Prefer the current Transformers package when an older GGUF installation
+    # still has a stale offline.mode marker after an update.
+    if online_models_marker.is_file():
+        required = (embedding_model,)
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise RuntimeError(
+                "Online model package is missing bundled model assets:\n" + "\n".join(missing)
+            )
+        os.environ.setdefault("EMBEDDING_MODEL", str(embedding_model))
+        os.environ["RERANKER_ENABLED"] = "false"
+        os.environ.setdefault("LLM_BACKEND", "qwen_transformers")
+        os.environ.setdefault("LLM_MODEL_ID", "Qwen/Qwen3-0.6B")
+        os.environ.setdefault("MODEL_AUTO_DOWNLOAD", "true")
+    elif offline_marker.is_file():
         required = (embedding_model, reranker_model, qwen_model, llama_cli, bsdtar)
         missing = [str(path) for path in required if not path.exists()]
         if missing:
@@ -70,18 +84,6 @@ def _configure_environment(home: Path) -> None:
         os.environ.setdefault("LLM_MODEL_ID", str(qwen_model))
         os.environ.setdefault("LLAMA_CLI_PATH", str(llama_cli))
         os.environ.setdefault("BSDTAR_PATH", str(bsdtar))
-    elif online_models_marker.is_file():
-        required = (embedding_model, online_reranker_model)
-        missing = [str(path) for path in required if not path.exists()]
-        if missing:
-            raise RuntimeError(
-                "Online model package is missing bundled model assets:\n" + "\n".join(missing)
-            )
-        os.environ.setdefault("EMBEDDING_MODEL", str(embedding_model))
-        os.environ["RERANKER_ENABLED"] = "false"
-        os.environ.setdefault("LLM_BACKEND", "qwen_transformers")
-        os.environ.setdefault("LLM_MODEL_ID", "Qwen/Qwen3-0.6B")
-        os.environ.setdefault("MODEL_AUTO_DOWNLOAD", "true")
     os.chdir(home)
 
 
