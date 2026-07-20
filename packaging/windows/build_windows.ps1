@@ -127,8 +127,6 @@ function Write-ZipPackage([string]$ZipName) {
     Write-Host "SHA-256: $Hash"
 }
 
-Write-VersionMetadata "online"
-
 if ($OnlineModels) {
     $ResolvedOnlineAssets = (Resolve-Path $OnlineModelAssetsPath).Path
     $RequiredOnlineAssets = @(
@@ -151,29 +149,33 @@ if ($OnlineModels) {
     exit 0
 }
 
-Write-ZipPackage "DocQA-v$Version-win-x64.zip"
-
-if (-not $OnlineOnly) {
-    $ResolvedOfflineAssets = (Resolve-Path $OfflineAssetsPath).Path
-    $RequiredOfflineAssets = @(
-        "models\embedding-bge-small-zh-v1.5",
-        "models\reranker-bge-base-int8\model.int8.onnx",
-        "models\qwen3\Qwen3-0.6B-Q8_0.gguf",
-        "tools\llama.cpp\llama-cli.exe",
-        "tools\libarchive\bsdtar.exe",
-        "licenses",
-        "MODEL_MANIFEST.json"
-    )
-    foreach ($RequiredAsset in $RequiredOfflineAssets) {
-        if (-not (Test-Path (Join-Path $ResolvedOfflineAssets $RequiredAsset))) {
-            throw "Offline asset is missing: $RequiredAsset"
-        }
-    }
-    Copy-Item (Join-Path $ResolvedOfflineAssets "models") $AppDir -Recurse -Force
-    Copy-Item (Join-Path $ResolvedOfflineAssets "tools") $AppDir -Recurse -Force
-    Copy-Item (Join-Path $ResolvedOfflineAssets "licenses") $AppDir -Recurse -Force
-    Copy-Item (Join-Path $ResolvedOfflineAssets "MODEL_MANIFEST.json") $AppDir -Force
-    Set-Content -LiteralPath (Join-Path $AppDir "offline.mode") -Value "complete" -Encoding ASCII
-    Write-VersionMetadata "offline-complete"
-    Write-ZipPackage "DocQA-v$Version-win-x64-offline.zip"
+if ($OnlineOnly) {
+    Write-VersionMetadata "online"
+    Write-ZipPackage "DocQA-v$Version-win-x64.zip"
+    exit 0
 }
+
+# The normal release path publishes one complete offline package. The legacy
+# online-only switches remain available for explicit development experiments.
+$ResolvedOfflineAssets = (Resolve-Path $OfflineAssetsPath).Path
+$RequiredOfflineAssets = @(
+    "models\embedding-bge-small-zh-v1.5",
+    "models\reranker-bge-base-int8\model.int8.onnx",
+    "models\qwen3\Qwen3-0.6B-Q8_0.gguf",
+    "tools\llama.cpp\llama-cli.exe",
+    "tools\libarchive\bsdtar.exe",
+    "licenses",
+    "MODEL_MANIFEST.json"
+)
+foreach ($RequiredAsset in $RequiredOfflineAssets) {
+    if (-not (Test-Path (Join-Path $ResolvedOfflineAssets $RequiredAsset))) {
+        throw "Offline asset is missing: $RequiredAsset"
+    }
+}
+Copy-Item (Join-Path $ResolvedOfflineAssets "models") $AppDir -Recurse -Force
+Copy-Item (Join-Path $ResolvedOfflineAssets "tools") $AppDir -Recurse -Force
+Copy-Item (Join-Path $ResolvedOfflineAssets "licenses") $AppDir -Recurse -Force
+Copy-Item (Join-Path $ResolvedOfflineAssets "MODEL_MANIFEST.json") $AppDir -Force
+Set-Content -LiteralPath (Join-Path $AppDir "offline.mode") -Value "complete" -Encoding ASCII
+Write-VersionMetadata "offline-complete"
+Write-ZipPackage "DocQA-v$Version-win-x64-offline.zip"

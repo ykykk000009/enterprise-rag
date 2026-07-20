@@ -149,9 +149,10 @@ class UpdateService:
         self._open = opener or urllib.request.urlopen
         self._now = now or (lambda: datetime.now(UTC))
         executable_dir = Path(sys.executable).resolve().parent
-        self.prefer_offline = bool(getattr(sys, "frozen", False)) and (
-            executable_dir / "offline.mode"
-        ).is_file()
+        # Published releases now contain the complete offline package only.
+        # Every frozen installation should therefore select that asset, including
+        # older lightweight installations upgrading to the full package.
+        self.prefer_offline = bool(getattr(sys, "frozen", False))
         self._lock = threading.RLock()
         self._worker: threading.Thread | None = None
         self._state = self._load_state()
