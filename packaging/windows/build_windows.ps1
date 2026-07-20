@@ -98,6 +98,7 @@ function Write-VersionMetadata([string]$Edition) {
         icon_file = "docqa.ico"
         app_version = $Version
         edition = $Edition
+        reranker_enabled = $false
         database_schema_version = "t05"
         embedding_model = "BAAI/bge-small-zh-v1.5"
         reranker_model = "BAAI/bge-reranker-base"

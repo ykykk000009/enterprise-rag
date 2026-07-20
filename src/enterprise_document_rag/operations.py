@@ -8,8 +8,9 @@ from pathlib import Path
 
 from .chunking import StructureAwareChunker
 from .config import Settings
+from .db import sqlite_connection
 from .embeddings import build_embedding_provider
-from .indexing import DocumentIndexer
+from .indexing import BatchIndexDocument, DocumentIndexer
 from .parsing import parse_document
 from .repositories import DocumentRepository, Job, JobRepository, SourceRepository
 from .scanner import ScanResult, SourceScanner
@@ -20,6 +21,13 @@ from .vector_store import QdrantLocalVectorStore, get_local_vector_store
 class ScanRun:
     result: ScanResult
     jobs: tuple[Job, ...]
+
+
+@dataclass(frozen=True)
+class PreparedIngestion:
+    job: Job
+    document_version_id: str
+    chunks: tuple
 
 
 class IngestionService:
@@ -86,6 +94,39 @@ class IngestionService:
             return self.jobs.fail(job_id=job.id, error=_safe_error(exc))
         return self.jobs.succeed(job_id=job.id)
 
+    def write_prepared_jobs(self, prepared: list[PreparedIngestion]) -> list[Job]:
+        """Write parser results through one SQLite/Qdrant owner."""
+        if not prepared:
+            return []
+        try:
+            DocumentIndexer(
+                connection=self.connection,
+                embedding_provider=self.embedding_provider,
+                vector_store=self._get_vector_store(),
+                collection_name=self.settings.vector_collection_name,
+                embedding_batch_size=self.settings.embedding_batch_size,
+            ).index_document_versions(
+                [
+                    BatchIndexDocument(
+                        document_version_id=item.document_version_id,
+                        chunks=item.chunks,
+                    )
+                    for item in prepared
+                ]
+            )
+        except Exception as exc:
+            error = _safe_error(exc)
+            results = []
+            for item in prepared:
+                self._mark_version_failed(item.document_version_id, error)
+                results.append(self.jobs.fail(job_id=item.job.id, error=error))
+            return results
+        return [self.jobs.succeed(job_id=item.job.id) for item in prepared]
+
+    def fail_prepared_job(self, *, job: Job, error: str) -> Job:
+        self._mark_pending_version_failed(job=job, error=error)
+        return self.jobs.fail(job_id=job.id, error=error)
+
     def enqueue_reindex(self, *, document_id: str) -> Job:
         document = self.documents.get(document_id)
         if document.visibility_state != "visible":
@@ -143,24 +184,7 @@ class IngestionService:
         self._index_version(path=path, version_id=version.id)
 
     def _index_version(self, *, path: Path, version_id: str) -> None:
-        parsed = parse_document(
-            path,
-            ocr_enabled=self.settings.ocr_enabled,
-            ocr_min_text_chars_per_page=self.settings.ocr_min_text_chars_per_page,
-            ocr_render_dpi=self.settings.ocr_render_dpi,
-            archive_max_members=self.settings.archive_max_members,
-            archive_max_member_bytes=self.settings.archive_max_member_bytes,
-            archive_max_uncompressed_bytes=self.settings.archive_max_uncompressed_bytes,
-            archive_max_compression_ratio=self.settings.archive_max_compression_ratio,
-        )
-        chunks = StructureAwareChunker(
-            target_tokens=self.settings.chunk_size_tokens,
-            overlap_tokens=self.settings.chunk_overlap_tokens,
-            min_tokens=self.settings.chunk_min_tokens,
-            max_tokens=self.settings.chunk_max_tokens,
-        ).chunk(parsed)
-        if not chunks:
-            raise ValueError("no indexable text was extracted from the document")
+        chunks = _parse_and_chunk(path=path, settings=self.settings)
         DocumentIndexer(
             connection=self.connection,
             embedding_provider=self.embedding_provider,
@@ -223,6 +247,70 @@ class IngestionService:
             (error, row["id"]),
         )
         self.connection.commit()
+
+    def _mark_version_failed(self, version_id: str, error: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE document_versions
+            SET state = 'failed', error = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (error, version_id),
+        )
+        self.connection.commit()
+
+
+def _parse_and_chunk(*, path: Path, settings: Settings) -> tuple:
+    parsed = parse_document(
+        path,
+        ocr_enabled=settings.ocr_enabled,
+        ocr_min_text_chars_per_page=settings.ocr_min_text_chars_per_page,
+        ocr_render_dpi=settings.ocr_render_dpi,
+        archive_max_members=settings.archive_max_members,
+        archive_max_member_bytes=settings.archive_max_member_bytes,
+        archive_max_uncompressed_bytes=settings.archive_max_uncompressed_bytes,
+        archive_max_compression_ratio=settings.archive_max_compression_ratio,
+    )
+    chunks = StructureAwareChunker(
+        target_tokens=settings.chunk_size_tokens,
+        overlap_tokens=settings.chunk_overlap_tokens,
+        min_tokens=settings.chunk_min_tokens,
+        max_tokens=settings.chunk_max_tokens,
+    ).chunk(parsed)
+    if not chunks:
+        raise ValueError("no indexable text was extracted from the document")
+    return chunks
+
+
+def prepare_ingestion_job(*, job: Job, settings: Settings) -> PreparedIngestion:
+    """Read metadata and parse one job without sharing the writer connection."""
+    if job.operation.lower() not in {"add", "update", "reindex"}:
+        raise ValueError(f"unsupported parallel ingestion operation: {job.operation}")
+    with sqlite_connection(settings) as connection:
+        documents = DocumentRepository(connection)
+        path = Path(job.path)
+        if not path.is_file():
+            raise FileNotFoundError("source file is no longer available")
+        document = documents.get_by_path(
+            knowledge_base_id=job.knowledge_base_id,
+            canonical_path=path.resolve(),
+        )
+        if document is None:
+            raise ValueError("document metadata is missing")
+        version = (
+            documents.get_active_version(document.id) or documents.get_latest_version(document.id)
+            if job.operation.lower() == "reindex"
+            else documents.get_latest_version(document.id)
+        )
+        if version is None:
+            raise ValueError("document version is missing")
+        if job.expected_sha256 is not None and version.sha256 != job.expected_sha256:
+            raise ValueError("stale job fingerprint does not match the document version")
+        return PreparedIngestion(
+            job=job,
+            document_version_id=version.id,
+            chunks=_parse_and_chunk(path=path, settings=settings),
+        )
 
 
 def _safe_error(exc: Exception) -> str:

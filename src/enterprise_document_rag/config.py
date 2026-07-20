@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_backend: str = "bge"
     embedding_device: str = "cpu"
-    embedding_batch_size: int = Field(default=8, ge=1, le=64)
-    reranker_enabled: bool = True
+    embedding_batch_size: int = Field(default=16, ge=1, le=64)
+    reranker_enabled: bool = False
     reranker_backend: str = "bge"
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_device: str = "cpu"
@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     llm_model_id: str = "Qwen/Qwen3-0.6B"
     llama_cli_path: Path | None = None
     llm_context_size: int = Field(default=8192, ge=1024, le=32768)
-    llm_max_new_tokens: int = Field(default=320, ge=32, le=512)
+    llm_max_new_tokens: int = Field(default=256, ge=32, le=512)
+    llm_preload: bool = True
+    llm_complex_question_enabled: bool = True
     huggingface_home: Path | None = None
     model_download_repository: str = "Qwen/Qwen3-0.6B"
     model_auto_download: bool = False
@@ -50,10 +52,13 @@ class Settings(BaseSettings):
     archive_max_member_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
     archive_max_uncompressed_bytes: int = Field(default=200 * 1024 * 1024, ge=1)
     archive_max_compression_ratio: int = Field(default=100, ge=1, le=1_000)
+    parse_workers: int = Field(default=4, ge=1, le=16)
+    ingestion_batch_size: int = Field(default=16, ge=1, le=64)
     vector_top_k: int = Field(default=40, ge=1)
     fts_top_k: int = Field(default=40, ge=1)
     retrieval_candidate_top_k: int = Field(default=12, ge=1)
-    max_chunks_per_document: int = Field(default=1, ge=1)
+    simple_candidate_top_k: int = Field(default=6, ge=1)
+    max_chunks_per_document: int = Field(default=3, ge=1, le=5)
     final_top_k: int = Field(default=10, ge=1)
     graph_rag_enabled: bool = False
     app_data_dir: Path | None = None

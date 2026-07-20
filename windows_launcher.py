@@ -65,9 +65,7 @@ def _configure_environment(home: Path) -> None:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("EMBEDDING_MODEL", str(embedding_model))
-        os.environ.setdefault("RERANKER_ENABLED", "true")
-        os.environ.setdefault("RERANKER_BACKEND", "onnx")
-        os.environ.setdefault("RERANKER_MODEL", str(reranker_model))
+        os.environ["RERANKER_ENABLED"] = "false"
         os.environ.setdefault("LLM_BACKEND", "qwen_gguf_cli")
         os.environ.setdefault("LLM_MODEL_ID", str(qwen_model))
         os.environ.setdefault("LLAMA_CLI_PATH", str(llama_cli))
@@ -80,9 +78,7 @@ def _configure_environment(home: Path) -> None:
                 "Online model package is missing bundled model assets:\n" + "\n".join(missing)
             )
         os.environ.setdefault("EMBEDDING_MODEL", str(embedding_model))
-        os.environ.setdefault("RERANKER_ENABLED", "true")
-        os.environ.setdefault("RERANKER_BACKEND", "bge")
-        os.environ.setdefault("RERANKER_MODEL", str(online_reranker_model))
+        os.environ["RERANKER_ENABLED"] = "false"
         os.environ.setdefault("LLM_BACKEND", "qwen_transformers")
         os.environ.setdefault("LLM_MODEL_ID", "Qwen/Qwen3-0.6B")
         os.environ.setdefault("MODEL_AUTO_DOWNLOAD", "true")

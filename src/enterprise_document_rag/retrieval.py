@@ -1,6 +1,8 @@
 import json
 import re
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +26,31 @@ class SearchResult:
     sources: frozenset[str] = field(default_factory=frozenset)
 
 
+class _QueryVectorCache:
+    def __init__(self, *, max_size: int = 256) -> None:
+        self.max_size = max_size
+        self._values: OrderedDict[tuple[int, str], tuple[float, ...]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get_or_create(self, *, provider: EmbeddingProvider, query: str) -> list[float]:
+        key = (id(provider), " ".join(query.split()))
+        with self._lock:
+            cached = self._values.get(key)
+            if cached is not None:
+                self._values.move_to_end(key)
+                return list(cached)
+        vector = tuple(float(value) for value in provider.embed_texts([query])[0])
+        with self._lock:
+            self._values[key] = vector
+            self._values.move_to_end(key)
+            while len(self._values) > self.max_size:
+                self._values.popitem(last=False)
+        return list(vector)
+
+
+_QUERY_VECTOR_CACHE = _QueryVectorCache()
+
+
 class HybridRetriever:
     def __init__(
         self,
@@ -37,6 +64,7 @@ class HybridRetriever:
         rrf_k: int = 60,
         candidate_top_k: int = 60,
         max_chunks_per_document: int = 1,
+        simple_candidate_top_k: int = 6,
         final_top_k: int = 6,
         reranker: Reranker | None = None,
     ) -> None:
@@ -49,6 +77,7 @@ class HybridRetriever:
         self.rrf_k = rrf_k
         self.candidate_top_k = candidate_top_k
         self.max_chunks_per_document = max_chunks_per_document
+        self.simple_candidate_top_k = simple_candidate_top_k
         self.final_top_k = final_top_k
         self.reranker = reranker
 
@@ -58,22 +87,35 @@ class HybridRetriever:
         knowledge_base_id: str,
         query: str,
         allowed_document_ids: set[str] | None = None,
+        max_chunks_per_document: int | None = None,
+        candidate_top_k: int | None = None,
+        final_top_k: int | None = None,
     ) -> list[SearchResult]:
-        fts_ranked = self._fts_search(
+        exact_ranked = self._exact_search(
             knowledge_base_id=knowledge_base_id,
             query=query,
             allowed_document_ids=allowed_document_ids,
         )
-        contains_ranked = self._contains_search(
-            knowledge_base_id=knowledge_base_id,
-            query=query,
-            allowed_document_ids=allowed_document_ids,
-        )
-        vector_ranked = self._vector_search(
-            knowledge_base_id=knowledge_base_id,
-            query=query,
-            allowed_document_ids=allowed_document_ids,
-        )
+        if exact_ranked:
+            fts_ranked = exact_ranked
+            contains_ranked = exact_ranked
+            vector_ranked = []
+        else:
+            fts_ranked = self._fts_search(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                allowed_document_ids=allowed_document_ids,
+            )
+            contains_ranked = self._contains_search(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                allowed_document_ids=allowed_document_ids,
+            )
+            vector_ranked = self._vector_search(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                allowed_document_ids=allowed_document_ids,
+            )
         fused_scores: dict[str, float] = {}
         sources: dict[str, set[str]] = {}
         for source_name, ranked_ids in [
@@ -86,7 +128,12 @@ class HybridRetriever:
                 sources.setdefault(chunk_id, set()).add(source_name)
 
         ranked = sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
-        candidate_ids = [chunk_id for chunk_id, _ in ranked[: self.candidate_top_k]]
+        effective_candidate_top_k = candidate_top_k or (
+            self.candidate_top_k
+            if is_complex_query(query)
+            else min(self.candidate_top_k, self.simple_candidate_top_k)
+        )
+        candidate_ids = [chunk_id for chunk_id, _ in ranked[:effective_candidate_top_k]]
         rows = self._load_chunk_rows(
             knowledge_base_id=knowledge_base_id,
             chunk_ids=candidate_ids,
@@ -103,6 +150,8 @@ class HybridRetriever:
             candidate_ids=candidate_ids,
             by_id=by_id,
             rank_scores=rank_scores,
+            max_chunks_per_document=max_chunks_per_document,
+            final_top_k=final_top_k,
         )
         results: list[SearchResult] = []
         for chunk_id in chunk_ids:
@@ -162,7 +211,11 @@ class HybridRetriever:
         candidate_ids: list[str],
         by_id: dict[str, sqlite3.Row],
         rank_scores: dict[str, float],
+        max_chunks_per_document: int | None,
+        final_top_k: int | None,
     ) -> list[str]:
+        max_per_document = max_chunks_per_document or self.max_chunks_per_document
+        result_limit = final_top_k or self.final_top_k
         document_counts: dict[str, int] = {}
         selected_text_keys: list[str] = []
         selected: list[str] = []
@@ -173,7 +226,7 @@ class HybridRetriever:
             if row is None:
                 continue
             document_id = str(row["document_id"])
-            if document_counts.get(document_id, 0) >= self.max_chunks_per_document:
+            if document_counts.get(document_id, 0) >= max_per_document:
                 continue
             text_key = normalized_text_key(str(row["text"]))
             if is_near_duplicate(text_key, selected_text_keys):
@@ -181,7 +234,7 @@ class HybridRetriever:
             selected.append(chunk_id)
             selected_text_keys.append(text_key)
             document_counts[document_id] = document_counts.get(document_id, 0) + 1
-            if len(selected) >= self.final_top_k:
+            if len(selected) >= result_limit:
                 break
         return selected
 
@@ -219,6 +272,59 @@ class HybridRetriever:
         ).fetchall()
         return [row["chunk_id"] for row in rows]
 
+    def _exact_search(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        allowed_document_ids: set[str] | None,
+    ) -> list[str]:
+        """Short-circuit semantic search for identifiable literal phrases."""
+        terms = _exact_terms(query)
+        if not terms or (allowed_document_ids is not None and not allowed_document_ids):
+            return []
+        match_params: list[object] = []
+        match_clauses: list[str] = []
+        score_clauses: list[str] = []
+        for term in terms:
+            pattern = _like_pattern(term)
+            match_clauses.append(
+                "(chunks.text LIKE ? ESCAPE '\\' OR chunks_fts.text LIKE ? ESCAPE '\\')"
+            )
+            match_params.extend((pattern, pattern))
+            score_clauses.append(
+                "CASE WHEN chunks.text LIKE ? ESCAPE '\\' "
+                "OR chunks_fts.text LIKE ? ESCAPE '\\' THEN ? ELSE 0 END"
+            )
+        score_params: list[object] = []
+        for term in terms:
+            pattern = _like_pattern(term)
+            score_params.extend((pattern, pattern, float(len(term))))
+        params: list[object] = [*score_params, knowledge_base_id, *match_params]
+        acl_clause = ""
+        if allowed_document_ids is not None:
+            placeholders = ",".join("?" for _ in allowed_document_ids)
+            acl_clause = f" AND documents.id IN ({placeholders})"
+            params.extend(sorted(allowed_document_ids))
+        params.append(self.fts_top_k)
+        rows = self.connection.execute(
+            f"""
+            SELECT chunks.id AS chunk_id, ({' + '.join(score_clauses)}) AS exact_score
+            FROM chunks
+            JOIN chunks_fts ON chunks_fts.chunk_id = chunks.id
+            JOIN document_versions ON document_versions.id = chunks.document_version_id
+            JOIN documents ON documents.active_version_id = document_versions.id
+            WHERE documents.knowledge_base_id = ?
+                AND documents.visibility_state = 'visible'
+                AND ({' OR '.join(match_clauses)})
+                {acl_clause}
+            ORDER BY exact_score DESC, chunks.chunk_index
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [row["chunk_id"] for row in rows]
+
     def _vector_search(
         self,
         *,
@@ -228,7 +334,10 @@ class HybridRetriever:
     ) -> list[str]:
         if allowed_document_ids is not None and not allowed_document_ids:
             return []
-        query_vector = self.embedding_provider.embed_texts([query])[0]
+        query_vector = _QUERY_VECTOR_CACHE.get_or_create(
+            provider=self.embedding_provider,
+            query=query,
+        )
         filter_conditions: dict[str, str | list[str]] = {"knowledge_base_id": knowledge_base_id}
         if allowed_document_ids is not None:
             filter_conditions["document_id"] = sorted(allowed_document_ids)
@@ -377,9 +486,57 @@ def _contains_terms(query: str) -> list[tuple[str, float]]:
     return terms[:24]
 
 
+def _exact_terms(query: str) -> list[str]:
+    terms: list[str] = []
+
+    def add(value: str) -> None:
+        value = " ".join(value.split()).strip()
+        if len(value) >= 3 and value not in terms:
+            terms.append(value)
+
+    for phrase in _quoted_phrases(query):
+        add(phrase)
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", query):
+        add(token)
+    question_words = re.compile(
+        r"(?:\u662f\u4ec0\u4e48|\u662f\u591a\u5c11|\u6709\u54ea\u4e9b|\u54ea\u4e9b|"
+        r"\u600e\u4e48\u7406\u89e3|\u600e\u4e48\u529e|\u5982\u4f55|\u4e3a\u4ec0\u4e48|"
+        r"\u662f\u5426|\u9700\u8981|\u591a\u5c11)$"
+    )
+    for sequence in re.findall(r"[\u4e00-\u9fff]+", query):
+        cleaned = question_words.sub("", sequence)
+        for part in re.split(r"[\u7684\u4e2d\u91cc\u4e0e\u53ca\u5bf9\u4e8e]", cleaned):
+            add(part)
+    return terms[:8]
+
+
 def _quoted_phrases(query: str) -> list[str]:
     phrases = re.findall(r'[“"]([^”"]{2,120})[”"]', query)
     return list(dict.fromkeys(" ".join(phrase.split()) for phrase in phrases if phrase.strip()))
+
+
+def is_complex_query(query: str) -> bool:
+    normalized = "".join(query.split())
+    markers = (
+        "\u54ea\u4e9b",
+        "\u5168\u90e8",
+        "\u539f\u5219",
+        "\u6b65\u9aa4",
+        "\u5408\u8ba1",
+        "\u603b\u548c",
+        "\u8be6\u7ec6",
+        "\u5305\u62ec",
+        "\u5206\u522b",
+        "\u6761\u4ef6",
+        "\u8981\u6c42",
+        "\u662f\u5426",
+        "\u533a\u522b",
+        "\u5982\u4f55",
+        "\u4e3a\u4ec0\u4e48",
+        "\u9700\u8981",
+        "\u505a\u4ec0\u4e48",
+    )
+    return len(normalized) >= 20 or any(marker in normalized for marker in markers)
 
 
 def _chinese_query_phrases(sequence: str) -> list[str]:

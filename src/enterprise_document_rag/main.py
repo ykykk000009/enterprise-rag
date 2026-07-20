@@ -81,10 +81,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         initialize_sqlite(app_settings)
         with sqlite_connection(app_settings) as connection:
             JobRepository(connection).release_leases()
+        app.state.qwen_model_manager.start_auto_download()
+        if (
+            app_settings.llm_preload
+            and app_settings.llm_backend == "qwen_transformers"
+            and app.state.qwen_model_manager.is_ready()
+        ):
+            try:
+                app.state.llm_provider.preload()
+                app.state.llm_preloaded = True
+            except Exception as exc:
+                app.state.llm_preloaded = False
+                app.state.llm_preload_error = str(exc)
         worker = IngestionWorker(settings=app_settings)
         app.state.ingestion_worker = worker
         worker.start()
-        app.state.qwen_model_manager.start_auto_download()
         app.state.update_service.start_background_check()
         try:
             yield
@@ -100,6 +111,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = app_settings
     app.state.update_service = UpdateService(app_settings)
     app.state.qwen_model_manager = QwenModelManager(app_settings)
+    app.state.llm_provider = build_llm_provider(app_settings)
+    app.state.llm_preloaded = False
+    app.state.llm_preload_error = None
     app.state.shutdown_callback = None
 
     @app.get("/")
@@ -415,6 +429,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 knowledge_base_id=request.knowledge_base_id,
                 query=request.query,
                 allowed_document_ids=_allowed_document_ids(request.allowed_document_ids),
+                max_chunks_per_document=1,
             )
         return [_search_payload(result) for result in results]
 
@@ -469,7 +484,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             answer = RAGAnswerer(
                 connection=connection,
                 retriever=retriever,
-                llm_provider=build_llm_provider(app_settings),
+                llm_provider=app.state.llm_provider,
             ).answer(
                 knowledge_base_id=request.knowledge_base_id,
                 question=request.question,
@@ -508,6 +523,7 @@ def _retriever(*, connection, settings: Settings) -> HybridRetriever:
         fts_top_k=settings.fts_top_k,
         candidate_top_k=settings.retrieval_candidate_top_k,
         max_chunks_per_document=settings.max_chunks_per_document,
+        simple_candidate_top_k=settings.simple_candidate_top_k,
         final_top_k=settings.final_top_k,
         reranker=build_reranker(settings),
     )

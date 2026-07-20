@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,20 @@ class IndexingResult:
     chunk_count: int
     fts_count: int
     vector_count: int
+
+
+@dataclass(frozen=True)
+class BatchIndexDocument:
+    document_version_id: str
+    chunks: tuple[Chunk, ...]
+
+
+@dataclass(frozen=True)
+class _PreparedIndexDocument:
+    item: BatchIndexDocument
+    document: sqlite3.Row
+    chunk_ids: list[str]
+    indexed_texts: tuple[str, ...]
 
 
 class SqliteFtsIndex:
@@ -73,76 +88,105 @@ class DocumentIndexer:
         document_version_id: str,
         chunks: tuple[Chunk, ...],
     ) -> IndexingResult:
-        version = self._get_version(document_version_id)
-        document_id = version["document_id"]
-        document = self._get_document(document_id)
-        chunk_ids = [str(uuid.uuid4()) for _ in chunks]
-        canonical_path = str(document["canonical_path"])
-        file_name = Path(canonical_path).name
-        indexed_texts = tuple(
-            _indexed_chunk_text(
-                canonical_path=canonical_path,
-                section_path=chunk.section_path,
-                text=chunk.text,
-            )
-            for chunk in chunks
-        )
+        return self.index_document_versions(
+            [BatchIndexDocument(document_version_id=document_version_id, chunks=chunks)]
+        )[0]
 
-        self._set_version_state(document_version_id, "indexing")
+    def index_document_versions(
+        self,
+        documents: Sequence[BatchIndexDocument],
+    ) -> tuple[IndexingResult, ...]:
+        """Index several prepared documents while embedding their chunks globally.
+
+        All calls to SQLite and the vector store stay on this writer thread. The
+        parser can prepare documents concurrently, then this method amortizes
+        embedding overhead across document boundaries.
+        """
+        if not documents:
+            return ()
+        prepared: list[_PreparedIndexDocument] = []
+        for item in documents:
+            if not item.chunks:
+                raise ValueError("no indexable text was extracted from the document")
+            version = self._get_version(item.document_version_id)
+            document_id = version["document_id"]
+            document = self._get_document(document_id)
+            canonical_path = str(document["canonical_path"])
+            chunk_ids = [str(uuid.uuid4()) for _ in item.chunks]
+            indexed_texts = tuple(
+                _indexed_chunk_text(
+                    canonical_path=canonical_path,
+                    section_path=chunk.section_path,
+                    text=chunk.text,
+                )
+                for chunk in item.chunks
+            )
+            prepared.append(
+                _PreparedIndexDocument(
+                    item=item,
+                    document=document,
+                    chunk_ids=chunk_ids,
+                    indexed_texts=indexed_texts,
+                )
+            )
+
+        version_ids = [item.item.document_version_id for item in prepared]
+        for version_id in version_ids:
+            self._set_version_state(version_id, "indexing")
         try:
-            self.connection.execute("BEGIN")
-            self._delete_version_records(document_version_id)
-            self._insert_chunks(document_version_id, chunk_ids, chunks, indexed_texts)
-            self.connection.commit()
+            for item in prepared:
+                self.connection.execute("BEGIN")
+                self._delete_version_records(item.item.document_version_id)
+                self._insert_chunks(
+                    item.item.document_version_id,
+                    item.chunk_ids,
+                    item.item.chunks,
+                    item.indexed_texts,
+                )
+                self.connection.commit()
 
-            vector_count = self._embed_and_store_vectors(
-                knowledge_base_id=document["knowledge_base_id"],
-                document_id=document_id,
-                document_version_id=document_version_id,
-                chunk_ids=chunk_ids,
-                chunks=chunks,
-                indexed_texts=indexed_texts,
-                file_name=file_name,
-                canonical_path=canonical_path,
-            )
-
+            vector_counts = self._embed_and_store_vectors_batch(prepared)
+            results: list[IndexingResult] = []
             self.connection.execute("BEGIN")
-            self._insert_index_records(chunk_ids)
-            chunk_count = self._count_chunks(document_version_id)
-            fts_count = SqliteFtsIndex(self.connection).count_for_version(document_version_id)
-            counts_match = (
-                chunk_count == len(chunks)
-                and fts_count == len(chunks)
-                and vector_count == len(chunks)
-            )
-            if not counts_match:
-                raise IndexingError("chunk, FTS and vector counts do not match")
-            self.connection.execute(
-                """
-                UPDATE document_versions
-                SET state = 'ready', updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (document_version_id,),
-            )
-            self.connection.execute(
-                """
-                UPDATE documents
-                SET active_version_id = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (document_version_id, document_id),
-            )
+            for item in prepared:
+                version_id = item.item.document_version_id
+                expected = len(item.item.chunks)
+                self._insert_index_records(item.chunk_ids)
+                chunk_count = self._count_chunks(version_id)
+                fts_count = SqliteFtsIndex(self.connection).count_for_version(version_id)
+                vector_count = vector_counts.get(version_id, 0)
+                if (chunk_count, fts_count, vector_count) != (expected, expected, expected):
+                    raise IndexingError("chunk, FTS and vector counts do not match")
+                self.connection.execute(
+                    """
+                    UPDATE document_versions
+                    SET state = 'ready', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (version_id,),
+                )
+                self.connection.execute(
+                    """
+                    UPDATE documents
+                    SET active_version_id = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (version_id, item.document["id"]),
+                )
+                results.append(
+                    IndexingResult(
+                        chunk_count=chunk_count,
+                        fts_count=fts_count,
+                        vector_count=vector_count,
+                    )
+                )
             self.connection.commit()
-            return IndexingResult(
-                chunk_count=chunk_count,
-                fts_count=fts_count,
-                vector_count=vector_count,
-            )
+            return tuple(results)
         except Exception as exc:
             if self.connection.in_transaction:
                 self.connection.rollback()
-            self._mark_failed(document_version_id, str(exc))
+            for version_id in version_ids:
+                self._mark_failed(version_id, str(exc))
             raise
 
     def _get_version(self, document_version_id: str) -> sqlite3.Row:
@@ -243,47 +287,47 @@ class DocumentIndexer:
             fts_rows,
         )
 
-    def _embed_and_store_vectors(
-        self,
-        *,
-        knowledge_base_id: str,
-        document_id: str,
-        document_version_id: str,
-        chunk_ids: list[str],
-        chunks: tuple[Chunk, ...],
-        indexed_texts: tuple[str, ...],
-        file_name: str,
-        canonical_path: str,
-    ) -> int:
-        total = 0
-        for start in range(0, len(chunks), self.embedding_batch_size):
-            batch = chunks[start : start + self.embedding_batch_size]
-            batch_ids = chunk_ids[start : start + self.embedding_batch_size]
-            batch_texts = indexed_texts[start : start + self.embedding_batch_size]
-            vectors = self.embedding_provider.embed_texts(list(batch_texts))
-            records = [
-                VectorRecord(
-                    id=batch_ids[index],
-                    vector=vector,
-                    payload={
-                        "chunk_id": batch_ids[index],
-                        "document_id": document_id,
-                        "knowledge_base_id": knowledge_base_id,
-                        "document_version_id": document_version_id,
-                        "chunk_index": batch[index].chunk_index,
-                        "file_name": file_name,
-                        "canonical_path": canonical_path,
-                    },
+    def _embed_and_store_vectors_batch(
+        self, documents: Sequence["_PreparedIndexDocument"]
+    ) -> dict[str, int]:
+        rows = [
+            (document, index, chunk, document.indexed_texts[index], document.chunk_ids[index])
+            for document in documents
+            for index, chunk in enumerate(document.item.chunks)
+        ]
+        counts = {document.item.document_version_id: 0 for document in documents}
+        for start in range(0, len(rows), self.embedding_batch_size):
+            batch_rows = rows[start : start + self.embedding_batch_size]
+            vectors = self.embedding_provider.embed_texts(
+                [row[3] for row in batch_rows]
+            )
+            if len(vectors) != len(batch_rows):
+                raise IndexingError("embedding provider returned an unexpected vector count")
+            records = []
+            for row, vector in zip(batch_rows, vectors, strict=True):
+                document, _, chunk, _, chunk_id = row
+                records.append(
+                    VectorRecord(
+                        id=chunk_id,
+                        vector=vector,
+                        payload={
+                            "chunk_id": chunk_id,
+                            "document_id": document.document["id"],
+                            "knowledge_base_id": document.document["knowledge_base_id"],
+                            "document_version_id": document.item.document_version_id,
+                            "chunk_index": chunk.chunk_index,
+                            "file_name": Path(document.document["canonical_path"]).name,
+                            "canonical_path": str(document.document["canonical_path"]),
+                        },
+                    )
                 )
-                for index, vector in enumerate(vectors)
-            ]
+                counts[document.item.document_version_id] += 1
             self.vector_store.upsert(
                 collection_name=self.collection_name,
                 records=records,
                 dimension=self.embedding_provider.dimension,
             )
-            total += len(records)
-        return total
+        return counts
 
     def _insert_index_records(self, chunk_ids: list[str]) -> None:
         records = [

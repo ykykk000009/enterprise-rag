@@ -196,7 +196,10 @@ def _parse_pdf_document(
                     bbox=(float(x0), float(y0), float(x1), float(y1)),
                 )
             )
-        if ocr_enabled and _text_character_count(blocks) < ocr_min_text_chars_per_page:
+        if ocr_enabled and _should_ocr_page(
+            blocks=blocks,
+            min_text_chars=ocr_min_text_chars_per_page,
+        ):
             if provider is None:
                 provider = RapidOcrProvider()
             for ocr_block in provider.extract_page(page=page, dpi=ocr_render_dpi):
@@ -1167,3 +1170,8 @@ def _heading_level(style_name: str) -> int | None:
 
 def _text_character_count(blocks: list[ParsedBlock]) -> int:
     return sum(sum(character.isalnum() for character in block.text) for block in blocks)
+
+
+def _should_ocr_page(*, blocks: list[ParsedBlock], min_text_chars: int) -> bool:
+    """OCR only pages with no meaningful text; text-rich PDF pages are skipped."""
+    return _text_character_count(blocks) < min_text_chars

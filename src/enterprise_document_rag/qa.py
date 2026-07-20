@@ -1,14 +1,15 @@
 import re
 import sqlite3
 import subprocess
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
 from .config import Settings
-from .retrieval import HybridRetriever, SearchResult
-from .text_utils import merge_context_texts
+from .retrieval import HybridRetriever, SearchResult, is_complex_query
+from .text_utils import clean_display_text, merge_context_texts
 
 
 @dataclass(frozen=True)
@@ -48,11 +49,19 @@ class ExtractiveLLMProvider:
 class LocalQwenProvider:
     """Local CPU Qwen generator constrained to retrieved evidence."""
 
-    def __init__(self, *, model_id: str, max_new_tokens: int) -> None:
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        max_new_tokens: int,
+        complex_question_enabled: bool = True,
+    ) -> None:
         self.model_id = model_id
         self.max_new_tokens = max_new_tokens
         self._model = None
         self._tokenizer = None
+        self._model_lock = threading.Lock()
+        self.complex_question_enabled = complex_question_enabled
 
     def answer_from_evidence(self, *, question: str, evidence: list[SearchResult]) -> str:
         context = "\n\n".join(
@@ -98,11 +107,37 @@ class LocalQwenProvider:
                 ),
             },
         ]
+        draft_messages[0]["content"] += (
+            "\u539f\u6587\u4f18\u5148\uff1a\u5982\u679c\u8bc1\u636e\u4e2d\u5b58\u5728\u76f4\u63a5\u56de\u7b54\u95ee\u9898\u7684\u5b8c\u6574\u53e5\u5b50\u6216\u6bb5\u843d\uff0c\u5c3d\u91cf\u539f\u6837\u4fdd\u7559\uff0c\u4e0d\u8981\u538b\u7f29\u6210\u4e00\u53e5\u7a7a\u6cdb\u7ed3\u8bba\uff1b\u53ea\u6709\u8bc1\u636e\u8f83\u957f\u65f6\u624d\u603b\u7ed3\u3002\u4e0d\u5f97\u5220\u9664\u6570\u5b57\u3001\u540d\u79f0\u3001\u6761\u4ef6\u3001\u6b65\u9aa4\u3001\u5206\u7c7b\u548c\u9650\u5b9a\u8bcd\u3002"
+        )
         generated = self._generate(draft_messages)
         draft = _finalize_generated_answer(generated, evidence_count=len(evidence))
         if draft is None:
             draft = ExtractiveLLMProvider().answer_from_evidence(
                 question=question,
+                evidence=evidence,
+            )
+
+        if not self.complex_question_enabled or not _requires_evidence_review(
+            question=question,
+            evidence=evidence,
+            outlines=outlines,
+        ):
+            return _ensure_numbered_outline_coverage(
+                question=question,
+                answer=draft,
+                outlines=outlines,
+            )
+
+        if not _needs_second_review(
+            question=question,
+            draft=draft,
+            evidence=evidence,
+            outlines=outlines,
+        ):
+            return _audit_answer_completeness(
+                question=question,
+                answer=draft,
                 evidence=evidence,
             )
 
@@ -135,10 +170,10 @@ class LocalQwenProvider:
             evidence_count=len(evidence),
         )
         answer = _choose_reviewed_answer(draft=draft, reviewed=reviewed)
-        return _ensure_numbered_outline_coverage(
+        return _audit_answer_completeness(
             question=question,
             answer=answer,
-            outlines=outlines,
+            evidence=evidence,
         )
 
     def _generate(self, messages: list[dict[str, str]]) -> str:
@@ -150,18 +185,32 @@ class LocalQwenProvider:
             enable_thinking=False,
         )
         inputs = tokenizer(prompt, return_tensors="pt")
-        output = model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+        import torch
+
+        with torch.inference_mode():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+            )
         generated_tokens = output[0][inputs["input_ids"].shape[1] :]
         return tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
     def _get_model(self):
         if self._model is None or self._tokenizer is None:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            with self._model_lock:
+                if self._model is None or self._tokenizer is None:
+                    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-            self._model = AutoModelForCausalLM.from_pretrained(self.model_id)
-            self._model.eval()
+                    self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+                    self._model = AutoModelForCausalLM.from_pretrained(self.model_id)
+                    self._model.eval()
         return self._model, self._tokenizer
+
+    def preload(self) -> None:
+        """Load tokenizer and weights before the first user question."""
+        self._get_model()
 
 
 class LlamaCppQwenProvider(LocalQwenProvider):
@@ -218,6 +267,11 @@ class LlamaCppQwenProvider(LocalQwenProvider):
         )
         return _extract_llama_cli_answer(completed.stdout, prompt=prompt)
 
+    def preload(self) -> None:
+        # llama.cpp loads the GGUF per request; there is no Transformers object
+        # to preload here. The method keeps the startup contract uniform.
+        return None
+
 
 def _llama_cli_prompts(messages: list[dict[str, str]]) -> tuple[str, str]:
     system_prompt = "\n\n".join(
@@ -258,8 +312,16 @@ def _extract_llama_cli_answer(output: str, *, prompt: str) -> str:
 
 
 @lru_cache
-def _qwen_provider(model_id: str, max_new_tokens: int) -> LocalQwenProvider:
-    return LocalQwenProvider(model_id=model_id, max_new_tokens=max_new_tokens)
+def _qwen_provider(
+    model_id: str,
+    max_new_tokens: int,
+    complex_question_enabled: bool = True,
+) -> LocalQwenProvider:
+    return LocalQwenProvider(
+        model_id=model_id,
+        max_new_tokens=max_new_tokens,
+        complex_question_enabled=complex_question_enabled,
+    )
 
 
 @lru_cache
@@ -281,7 +343,11 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
     if settings.llm_backend == "extractive":
         return ExtractiveLLMProvider()
     if settings.llm_backend == "qwen_transformers":
-        return _qwen_provider(settings.llm_model_id, settings.llm_max_new_tokens)
+        return _qwen_provider(
+            settings.llm_model_id,
+            settings.llm_max_new_tokens,
+            settings.llm_complex_question_enabled,
+        )
     if settings.llm_backend == "qwen_gguf_cli":
         if settings.llama_cli_path is None:
             raise ValueError("LLAMA_CLI_PATH is required for qwen_gguf_cli")
@@ -348,20 +414,28 @@ class RAGAnswerer:
             for index, result in enumerate(evidence, start=1)
         )
         self._validate_citations(knowledge_base_id=knowledge_base_id, citations=citations)
-        generation_evidence = _expand_answer_evidence(
+        generation_evidence = _expand_answer_evidence_compact(
             connection=self.connection,
             knowledge_base_id=knowledge_base_id,
             evidence=evidence,
-            radius=self.context_radius,
+            radius=3 if is_complex_query(question) else min(self.context_radius, 2),
         )
         table_total_answer = _answer_from_table_total(
             question=question,
             evidence=generation_evidence,
         )
+        direct_source_answer = _direct_source_answer(
+            question=question,
+            evidence=generation_evidence,
+        )
+        answer = table_total_answer or direct_source_answer or self.llm_provider.answer_from_evidence(
+            question=question,
+            evidence=generation_evidence,
+        )
         return Answer(
-            answer=table_total_answer
-            or self.llm_provider.answer_from_evidence(
+            answer=_audit_answer_completeness(
                 question=question,
+                answer=answer,
                 evidence=generation_evidence,
             ),
             confidence="medium" if len(citations) == 1 else "high",
@@ -571,6 +645,68 @@ def _ensure_numbered_outline_coverage(
     return f"依据原文，共有 {len(outline)} 项：{items}。[{citation_id}]"
 
 
+def _audit_answer_completeness(
+    *,
+    question: str,
+    answer: str,
+    evidence: list[SearchResult],
+) -> str:
+    """Replace an incomplete numbered summary with the complete evidence list."""
+    outlines = [
+        (citation_id, outline)
+        for citation_id, item in enumerate(evidence, start=1)
+        if (outline := _numbered_outline(item.quote))
+    ]
+    if not outlines or not (is_complex_query(question) or _is_collection_question(question)):
+        return answer
+    citation_id, outline = max(outlines, key=lambda item: len(item[1]))
+    normalized_answer = re.sub(r"\s+", "", answer)
+    missing = [
+        title
+        for _, title in outline
+        if re.sub(r"\s+", "", title) not in normalized_answer
+    ]
+    if not missing:
+        return answer
+    items = "；".join(f"{number}. {title}" for number, title in outline)
+    return f"\u4f9d\u636e\u539f\u6587\uff0c\u5171\u6709 {len(outline)} \u9879\uff1a{items}\u3002[{citation_id}]"
+
+
+def _direct_source_answer(
+    *,
+    question: str,
+    evidence: list[SearchResult],
+) -> str | None:
+    """Return short literal evidence unchanged instead of asking Qwen to paraphrase."""
+    if not evidence or len(evidence) > 3 or is_complex_query(question):
+        return None
+    question_markers = (
+        "\u4ec0\u4e48",
+        "\u591a\u5c11",
+        "\u54ea\u4e9b",
+        "\u5982\u4f55",
+        "\u4e3a\u4ec0\u4e48",
+        "\u662f\u5426",
+        "\u600e\u4e48",
+        "\u8bf7\u95ee",
+    )
+    if any(marker in question for marker in question_markers):
+        return None
+    if not all({"fts", "contains"} <= item.sources for item in evidence):
+        return None
+    texts = []
+    for item in evidence:
+        text = clean_display_text(item.quote)
+        text = re.sub(r"^\s*\u3010[^\u3011]*\u3011\s*$", "", text, flags=re.MULTILINE)
+        focused = _focus_answer_context(question=question, text=text, max_chars=900)
+        if focused.strip():
+            texts.append(focused)
+    merged = merge_context_texts(texts)
+    if not merged or len(merged) > 900:
+        return None
+    return f"{merged} [1]"
+
+
 def _is_collection_question(question: str) -> bool:
     collection_terms = (
         "有哪些",
@@ -588,6 +724,73 @@ def _is_collection_question(question: str) -> bool:
         "基本要求",
     )
     return any(term in question for term in collection_terms)
+
+
+def _requires_evidence_review(
+    *,
+    question: str,
+    evidence: list[SearchResult],
+    outlines: list[tuple[int, list[tuple[int, str]]]],
+) -> bool:
+    """Use a second pass only when an answer needs completeness checking."""
+    normalized = "".join(question.split())
+    markers = tuple(
+        marker
+        for marker in (
+            "\u54ea\u4e9b",
+            "\u5206\u522b",
+            "\u5217\u51fa",
+            "\u5168\u90e8",
+            "\u5b8c\u6574",
+            "\u539f\u5219",
+            "\u6b65\u9aa4",
+            "\u6761\u4ef6",
+            "\u533a\u522b",
+            "\u603b\u548c",
+            "\u5408\u8ba1",
+            "\u4e3a\u4ec0\u4e48",
+            "\u5982\u4f55",
+            "\u662f\u5426",
+            "\u8981\u6c42",
+            "\u8be6\u7ec6",
+            "\u5305\u62ec",
+            "\u4ee5\u53ca",
+            "\u5e76\u4e14",
+            "\u540c\u65f6",
+            "\u9700\u8981",
+            "\u505a\u4ec0\u4e48",
+        )
+    )
+    return (
+        is_complex_query(question)
+        or any(marker in normalized for marker in markers)
+        or any(len(outline) >= 2 for _, outline in outlines)
+        or len(evidence) >= 4 and "\u4ec0\u4e48" in normalized
+    )
+
+
+def _needs_second_review(
+    *,
+    question: str,
+    draft: str,
+    evidence: list[SearchResult],
+    outlines: list[tuple[int, list[tuple[int, str]]]],
+) -> bool:
+    if "\u505a\u4ec0\u4e48" in question and any("\u3010" in item.quote for item in evidence):
+        return True
+    if outlines:
+        answer_text = re.sub(r"\s+|\[\d+\]", "", draft)
+        return any(
+            re.sub(r"\s+", "", title) not in answer_text
+            for _, outline in outlines
+            for _, title in outline
+        )
+    source_text = re.sub(r"\s+", "", " ".join(item.quote for item in evidence))
+    draft_text = re.sub(r"\s+|\[\d+\]", "", draft)
+    if len(source_text) < 48:
+        return len(draft_text) < len(source_text) * 0.55
+    expected_minimum = min(220, max(48, int(len(source_text) * 0.28)))
+    return len(draft_text) < expected_minimum
 
 
 def _expand_answer_evidence(
@@ -641,6 +844,100 @@ def _expand_answer_evidence(
                 page_no=result.page_no,
                 section_path=result.section_path,
                 quote=context or result.quote,
+                bbox=result.bbox,
+                score=result.score,
+                sources=result.sources,
+            )
+        )
+    return expanded
+
+
+def _expand_answer_evidence_compact(
+    *,
+    connection: sqlite3.Connection,
+    knowledge_base_id: str,
+    evidence: list[SearchResult],
+    radius: int,
+) -> list[SearchResult]:
+    """Expand anchors and emit one merged context for overlapping windows."""
+    windows: list[tuple[SearchResult, int, dict[int, sqlite3.Row]]] = []
+    for result in evidence:
+        rows = connection.execute(
+            """
+            SELECT neighbor.chunk_index, anchor.chunk_index AS anchor_chunk_index,
+                neighbor.text
+            FROM chunks AS anchor
+            JOIN document_versions
+                ON document_versions.id = anchor.document_version_id
+            JOIN documents
+                ON documents.active_version_id = document_versions.id
+            JOIN chunks AS neighbor
+                ON neighbor.document_version_id = anchor.document_version_id
+            WHERE documents.knowledge_base_id = ?
+                AND documents.id = ?
+                AND documents.visibility_state = 'visible'
+                AND anchor.id = ?
+                AND neighbor.chunk_index BETWEEN anchor.chunk_index - ?
+                    AND anchor.chunk_index + ?
+            ORDER BY neighbor.chunk_index
+            """,
+            (knowledge_base_id, result.document_id, result.chunk_id, radius, radius),
+        ).fetchall()
+        if rows:
+            windows.append(
+                (
+                    result,
+                    int(rows[0]["anchor_chunk_index"]),
+                    {int(row["chunk_index"]): row for row in rows},
+                )
+            )
+        else:
+            windows.append((result, 0, {}))
+
+    document_rows: dict[str, dict[int, sqlite3.Row]] = {}
+    for result, _, rows in windows:
+        document_rows.setdefault(result.document_id, {}).update(rows)
+    document_segments: dict[str, list[tuple[int, ...]]] = {}
+    for document_id, rows in document_rows.items():
+        indexes = sorted(rows)
+        segments: list[list[int]] = []
+        for index in indexes:
+            if segments and index <= segments[-1][-1] + 1:
+                segments[-1].append(index)
+            else:
+                segments.append([index])
+        document_segments[document_id] = [tuple(segment) for segment in segments]
+
+    emitted: set[tuple[str, tuple[int, ...]]] = set()
+    expanded: list[SearchResult] = []
+    for result, anchor_index, rows in windows:
+        if not rows:
+            expanded.append(result)
+            continue
+        segment = next(
+            segment
+            for segment in document_segments[result.document_id]
+            if anchor_index in segment
+        )
+        key = (result.document_id, segment)
+        if key in emitted:
+            continue
+        emitted.add(key)
+        labeled_texts = []
+        for index in segment:
+            row = document_rows[result.document_id][index]
+            labeled_texts.append(
+                f"\u3010{_context_position_label(index - anchor_index)}\u3011\n{row['text']}"
+            )
+        expanded.append(
+            SearchResult(
+                chunk_id=result.chunk_id,
+                document_id=result.document_id,
+                file_name=result.file_name,
+                canonical_path=result.canonical_path,
+                page_no=result.page_no,
+                section_path=result.section_path,
+                quote=merge_context_texts(labeled_texts) or result.quote,
                 bbox=result.bbox,
                 score=result.score,
                 sources=result.sources,
