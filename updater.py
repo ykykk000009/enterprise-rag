@@ -216,7 +216,10 @@ def run() -> int:
         _safe_extract(package, extract_dir)
         payload = _payload_root(extract_dir, args.executable)
         _validate_payload(payload, args.executable)
-        replace_offline_assets = (payload / "offline.mode").is_file()
+        replace_offline_assets = (
+            (payload / "offline.mode").is_file()
+            or (payload / "online-models.mode").is_file()
+        )
         _move_existing_to_backup(
             install_dir,
             backup_dir,

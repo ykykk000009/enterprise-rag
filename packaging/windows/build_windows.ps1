@@ -3,6 +3,7 @@ param(
     [string]$OnlineModelAssetsPath = ".online-assets",
     [switch]$OnlineOnly,
     [switch]$OnlineModels,
+    [switch]$OfflineOnly,
     [string]$BootstrapPython = "python"
 )
 
@@ -127,7 +128,13 @@ function Write-ZipPackage([string]$ZipName) {
     Write-Host "SHA-256: $Hash"
 }
 
-if ($OnlineModels) {
+if ($OnlineOnly) {
+    Write-VersionMetadata "online"
+    Write-ZipPackage "DocQA-v$Version-win-x64.zip"
+    exit 0
+}
+
+if (-not $OfflineOnly) {
     $ResolvedOnlineAssets = (Resolve-Path $OnlineModelAssetsPath).Path
     $RequiredOnlineAssets = @(
         "models\embedding-bge-small-zh-v1.5\model.safetensors",
@@ -149,14 +156,7 @@ if ($OnlineModels) {
     exit 0
 }
 
-if ($OnlineOnly) {
-    Write-VersionMetadata "online"
-    Write-ZipPackage "DocQA-v$Version-win-x64.zip"
-    exit 0
-}
-
-# The normal release path publishes one complete offline package. The legacy
-# online-only switches remain available for explicit development experiments.
+# The legacy GGUF package remains available only for explicit experiments.
 $ResolvedOfflineAssets = (Resolve-Path $OfflineAssetsPath).Path
 $RequiredOfflineAssets = @(
     "models\embedding-bge-small-zh-v1.5",

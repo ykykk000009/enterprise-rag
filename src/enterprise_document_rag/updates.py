@@ -149,9 +149,9 @@ class UpdateService:
         self._open = opener or urllib.request.urlopen
         self._now = now or (lambda: datetime.now(UTC))
         executable_dir = Path(sys.executable).resolve().parent
-        # Published releases now contain the complete offline package only.
-        # Every frozen installation should therefore select that asset, including
-        # older lightweight installations upgrading to the full package.
+        # Published releases use one full package. Prefer the legacy offline
+        # asset when it exists, then fall back to the Transformers package.
+        # This also lets older installations migrate to the current format.
         self.prefer_offline = bool(getattr(sys, "frozen", False))
         self._lock = threading.RLock()
         self._worker: threading.Thread | None = None
