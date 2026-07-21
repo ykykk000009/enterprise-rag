@@ -8,8 +8,8 @@
 **系统完全免费，同时具备更高的数据隐私性与安全性。**      
 
 ## 界面/功能展示  
-<img width="2514" height="1395" alt="image" src="https://github.com/user-attachments/assets/3607d9f7-5342-4008-9352-a2c928fae69a" />
-  
+<img width="2505" height="1338" alt="image" src="https://github.com/user-attachments/assets/8a772ef4-de82-43c0-80f1-211e42d66b75" />  
+
 ## Windows 下载
 
 每个正式版本同时提供两个完整安装包：
