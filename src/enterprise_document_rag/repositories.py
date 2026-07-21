@@ -52,6 +52,9 @@ class DocumentVersion:
     sha256: str
     size_bytes: int
     mtime_ns: int
+    parser_version: str
+    layout_version: str | None
+    document_type: str | None
     state: str
 
 
@@ -108,6 +111,9 @@ def _row_to_document_version(row: sqlite3.Row) -> DocumentVersion:
         sha256=row["sha256"],
         size_bytes=row["size_bytes"],
         mtime_ns=row["mtime_ns"],
+        parser_version=row["parser_version"],
+        layout_version=row["layout_version"],
+        document_type=row["document_type"],
         state=row["state"],
     )
 

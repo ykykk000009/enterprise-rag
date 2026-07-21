@@ -1,8 +1,9 @@
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .parsing import ParsedBlock, ParsedDocument
+from .text_utils import sanitize_unicode
 
 TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]|[A-Za-z0-9_]+|[^\s]")
 
@@ -19,6 +20,16 @@ class Chunk:
     deduplicable: bool = True
     previous_chunk_index: int | None = None
     next_chunk_index: int | None = None
+    page_range: tuple[int, int] | None = None
+    bbox_list: tuple[tuple[float, float, float, float], ...] = ()
+    content_type: str = "text"
+    source_type: str = "native_text"
+    ocr_confidence: float | None = None
+    block_types: tuple[str, ...] = ()
+    table_markdown: str | None = None
+    image_path: str | None = None
+    caption: str | None = None
+    image_metadata: dict[str, object] | None = None
 
 
 class StructureAwareChunker:
@@ -76,6 +87,22 @@ class StructureAwareChunker:
         block: ParsedBlock,
     ) -> tuple[list[Chunk], list[ParsedBlock], int, bool]:
         block_tokens = count_tokens(block.text)
+        base_type = block.block_type.split(":", 1)[0]
+        if base_type in {"table", "table_row", "image"}:
+            if pending and not pending_from_overlap:
+                chunks.append(self._build_chunk(chunks, pending))
+            chunks.append(self._build_chunk(chunks, [block]))
+            return chunks, [], 0, False
+        if (
+            pending
+            and block.section_path != pending[-1].section_path
+            and block.block_type == "heading"
+        ):
+            if not pending_from_overlap:
+                chunks.append(self._build_chunk(chunks, pending))
+            pending = []
+            pending_tokens = 0
+            pending_from_overlap = False
         if pending and pending_tokens + block_tokens > self.max_tokens:
             if not pending_from_overlap:
                 chunks.append(self._build_chunk(chunks, pending))
@@ -100,6 +127,10 @@ class StructureAwareChunker:
         matches = list(TOKEN_PATTERN.finditer(block.text))
         if len(matches) <= self.max_tokens:
             return (block,)
+        if block.block_type == "table" and block.table_markdown:
+            table_pieces = self._split_markdown_table(block)
+            if table_pieces:
+                return table_pieces
         pieces: list[ParsedBlock] = []
         start_offset = 0
         for start_index in range(0, len(matches), self.max_tokens):
@@ -108,29 +139,54 @@ class StructureAwareChunker:
             text = block.text[start_offset:end_offset].strip()
             if text:
                 pieces.append(
-                    ParsedBlock(
+                    replace(
+                        block,
                         text=text,
-                        page_no=block.page_no,
-                        section_path=block.section_path,
-                        bbox=block.bbox,
                         block_type=f"{block.block_type}:chunk_split",
-                        confidence=block.confidence,
                     )
                 )
             start_offset = end_offset
         tail = block.text[start_offset:].strip()
         if tail:
             pieces.append(
-                ParsedBlock(
+                replace(
+                    block,
                     text=tail,
-                    page_no=block.page_no,
-                    section_path=block.section_path,
-                    bbox=block.bbox,
                     block_type=f"{block.block_type}:chunk_split",
-                    confidence=block.confidence,
                 )
             )
         return tuple(pieces)
+
+    def _split_markdown_table(self, block: ParsedBlock) -> tuple[ParsedBlock, ...]:
+        lines = [line for line in block.table_markdown.splitlines() if line.strip()]
+        if len(lines) < 3:
+            return ()
+        header = lines[:2]
+        header_tokens = count_tokens("\n".join(header))
+        if header_tokens >= self.max_tokens:
+            return ()
+        groups: list[list[str]] = []
+        current = list(header)
+        current_tokens = header_tokens
+        for row in lines[2:]:
+            row_tokens = count_tokens(row)
+            if len(current) > 2 and current_tokens + row_tokens > self.max_tokens:
+                groups.append(current)
+                current = list(header)
+                current_tokens = header_tokens
+            current.append(row)
+            current_tokens += row_tokens
+        if len(current) > 2:
+            groups.append(current)
+        return tuple(
+            replace(
+                block,
+                text="\n".join(group),
+                block_type="table:chunk_split",
+                table_markdown="\n".join(group),
+            )
+            for group in groups
+        )
 
     def _trim_overlap_to_fit(
         self,
@@ -154,8 +210,9 @@ class StructureAwareChunker:
         return self._chunk_from_blocks(chunk_index=len(chunks), blocks=blocks)
 
     def _chunk_from_blocks(self, *, chunk_index: int, blocks: list[ParsedBlock]) -> Chunk:
-        text = "\n\n".join(block.text for block in blocks).strip()
+        text = sanitize_unicode("\n\n".join(block.text for block in blocks)).strip()
         first = blocks[0]
+        metadata = _metadata_from_blocks(blocks)
         return Chunk(
             chunk_index=chunk_index,
             text=text,
@@ -165,32 +222,64 @@ class StructureAwareChunker:
             token_count=count_tokens(text),
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             deduplicable=not self._contains_split_block(blocks),
+            **metadata,
         )
 
     def _merge_chunk_with_blocks(self, chunk: Chunk, blocks: list[ParsedBlock]) -> Chunk:
         extra_text = "\n\n".join(block.text for block in blocks).strip()
-        text = "\n\n".join(item for item in [chunk.text, extra_text] if item)
-        return Chunk(
-            chunk_index=chunk.chunk_index,
+        text = sanitize_unicode("\n\n".join(item for item in [chunk.text, extra_text] if item))
+        extra = _metadata_from_blocks(blocks)
+        page_range = _merge_page_ranges(chunk.page_range, extra["page_range"])
+        bbox_list = tuple(dict.fromkeys((*chunk.bbox_list, *extra["bbox_list"])))
+        content_type = _merge_label(chunk.content_type, str(extra["content_type"]))
+        source_type = _merge_label(chunk.source_type, str(extra["source_type"]))
+        confidences = [
+            value
+            for value in (chunk.ocr_confidence, extra["ocr_confidence"])
+            if isinstance(value, (int, float))
+        ]
+        return replace(
+            chunk,
             text=text,
-            page_no=chunk.page_no,
-            section_path=chunk.section_path,
-            bbox=chunk.bbox,
             token_count=count_tokens(text),
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             deduplicable=chunk.deduplicable and not self._contains_split_block(blocks),
+            page_range=page_range,
+            bbox_list=bbox_list,
+            content_type=content_type,
+            source_type=source_type,
+            ocr_confidence=sum(confidences) / len(confidences) if confidences else None,
+            block_types=tuple(
+                dict.fromkeys((*chunk.block_types, *extra["block_types"]))
+            ),
+            table_markdown=(
+                chunk.table_markdown
+                if chunk.table_markdown == extra["table_markdown"]
+                else None
+            ),
+            image_path=(
+                chunk.image_path
+                if chunk.image_path == extra["image_path"]
+                else None
+            ),
+            caption=(
+                chunk.caption
+                if chunk.caption == extra["caption"]
+                else None
+            ),
+            image_metadata=(
+                chunk.image_metadata
+                if chunk.image_metadata == extra["image_metadata"]
+                else None
+            ),
         )
 
     def _with_index(self, chunk: Chunk, chunk_index: int) -> Chunk:
-        return Chunk(
+        return replace(
+            chunk,
             chunk_index=chunk_index,
-            text=chunk.text,
-            page_no=chunk.page_no,
-            section_path=chunk.section_path,
-            bbox=chunk.bbox,
-            token_count=chunk.token_count,
-            text_hash=chunk.text_hash,
-            deduplicable=chunk.deduplicable,
+            previous_chunk_index=None,
+            next_chunk_index=None,
         )
 
     def _overlap_blocks(self, blocks: list[ParsedBlock]) -> list[ParsedBlock]:
@@ -224,15 +313,9 @@ class StructureAwareChunker:
         linked: list[Chunk] = []
         for index, chunk in enumerate(chunks):
             linked.append(
-                Chunk(
+                replace(
+                    chunk,
                     chunk_index=index,
-                    text=chunk.text,
-                    page_no=chunk.page_no,
-                    section_path=chunk.section_path,
-                    bbox=chunk.bbox,
-                    token_count=chunk.token_count,
-                    text_hash=chunk.text_hash,
-                    deduplicable=chunk.deduplicable,
                     previous_chunk_index=index - 1 if index > 0 else None,
                     next_chunk_index=index + 1 if index < len(chunks) - 1 else None,
                 )
@@ -242,3 +325,83 @@ class StructureAwareChunker:
 
 def count_tokens(text: str) -> int:
     return len(TOKEN_PATTERN.findall(text))
+
+
+def _metadata_from_blocks(blocks: list[ParsedBlock]) -> dict[str, object]:
+    page_numbers = [block.page_no for block in blocks if block.page_no is not None]
+    boxes = tuple(
+        dict.fromkeys(block.bbox for block in blocks if block.bbox is not None)
+    )
+    block_types = tuple(
+        dict.fromkeys(block.block_type.split(":", 1)[0] for block in blocks)
+    )
+    content_types = {
+        "table"
+        if block_type in {"table", "table_row"}
+        else "image"
+        if block_type == "image"
+        else "text"
+        for block_type in block_types
+        if block_type not in {"header", "footer"}
+    }
+    source_types = {block.source_type for block in blocks}
+    confidences = [
+        float(block.confidence)
+        for block in blocks
+        if block.source_type == "ocr_text" and block.confidence is not None
+    ]
+    return {
+        "page_range": (
+            (min(page_numbers), max(page_numbers))
+            if page_numbers
+            else None
+        ),
+        "bbox_list": boxes,
+        "content_type": (
+            next(iter(content_types)) if len(content_types) == 1 else "mixed"
+        ),
+        "source_type": (
+            next(iter(source_types)) if len(source_types) == 1 else "mixed"
+        ),
+        "ocr_confidence": (
+            sum(confidences) / len(confidences) if confidences else None
+        ),
+        "block_types": block_types,
+        "table_markdown": next(
+            (
+                block.table_markdown
+                for block in blocks
+                if block.table_markdown is not None
+            ),
+            None,
+        ),
+        "image_path": next(
+            (block.image_path for block in blocks if block.image_path is not None),
+            None,
+        ),
+        "caption": next(
+            (block.caption for block in blocks if block.caption is not None),
+            None,
+        ),
+        "image_metadata": next(
+            (block.image_metadata for block in blocks if block.image_metadata is not None),
+            None,
+        ),
+    }
+
+
+def _merge_page_ranges(
+    first: tuple[int, int] | None,
+    second: object,
+) -> tuple[int, int] | None:
+    if not isinstance(second, tuple):
+        return first
+    if first is None:
+        return second
+    return (min(first[0], second[0]), max(first[1], second[1]))
+
+
+def _merge_label(first: str, second: str) -> str:
+    if first == second:
+        return first
+    return "mixed"

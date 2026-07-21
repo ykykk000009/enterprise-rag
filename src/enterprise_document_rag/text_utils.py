@@ -9,8 +9,33 @@ _METADATA_PREFIXES = (
 )
 
 
+def sanitize_unicode(text: str) -> str:
+    """Preserve valid Unicode while replacing malformed UTF-16 surrogates."""
+    normalized: list[str] = []
+    index = 0
+    while index < len(text):
+        codepoint = ord(text[index])
+        if 0xD800 <= codepoint <= 0xDBFF:
+            if index + 1 < len(text):
+                next_codepoint = ord(text[index + 1])
+                if 0xDC00 <= next_codepoint <= 0xDFFF:
+                    normalized.append(
+                        chr(0x10000 + ((codepoint - 0xD800) << 10) + next_codepoint - 0xDC00)
+                    )
+                    index += 2
+                    continue
+            normalized.append("\ufffd")
+        elif 0xDC00 <= codepoint <= 0xDFFF:
+            normalized.append("\ufffd")
+        else:
+            normalized.append(text[index])
+        index += 1
+    return "".join(normalized)
+
+
 def clean_display_text(text: str) -> str:
     """Remove retrieval-only metadata and repeated paragraphs from displayed text."""
+    text = sanitize_unicode(text)
     lines = []
     for line in text.splitlines():
         stripped = line.strip()

@@ -70,7 +70,9 @@ def _configure_environment(home: Path) -> None:
         os.environ["RERANKER_ENABLED"] = "false"
         os.environ.setdefault("LLM_BACKEND", "qwen_transformers")
         os.environ.setdefault("LLM_MODEL_ID", "Qwen/Qwen3-0.6B")
-        os.environ.setdefault("MODEL_AUTO_DOWNLOAD", "true")
+        # Keep packaged and development defaults aligned: model download remains
+        # an explicit user action from the application UI.
+        os.environ.setdefault("MODEL_AUTO_DOWNLOAD", "false")
     elif offline_marker.is_file():
         required = (embedding_model, reranker_model, qwen_model, llama_cli, bsdtar)
         missing = [str(path) for path in required if not path.exists()]

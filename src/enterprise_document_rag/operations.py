@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .chunking import StructureAwareChunker
+from .chunking import Chunk, StructureAwareChunker
 from .config import Settings
 from .db import sqlite_connection
 from .embeddings import build_embedding_provider
 from .indexing import BatchIndexDocument, DocumentIndexer
-from .parsing import parse_document
+from .parsing import ParsedDocument, parse_document
 from .repositories import DocumentRepository, Job, JobRepository, SourceRepository
+from .resource_control import background_work_gate, lower_current_thread_priority
 from .scanner import ScanResult, SourceScanner
 from .vector_store import QdrantLocalVectorStore, get_local_vector_store
 
@@ -27,7 +29,14 @@ class ScanRun:
 class PreparedIngestion:
     job: Job
     document_version_id: str
-    chunks: tuple
+    parsed_document: ParsedDocument
+    chunks: tuple[Chunk, ...]
+
+
+@dataclass(frozen=True)
+class ParsedChunks:
+    document: ParsedDocument
+    chunks: tuple[Chunk, ...]
 
 
 class IngestionService:
@@ -99,6 +108,11 @@ class IngestionService:
         if not prepared:
             return []
         try:
+            for item in prepared:
+                self._store_parsed_document_metadata(
+                    version_id=item.document_version_id,
+                    parsed=item.parsed_document,
+                )
             DocumentIndexer(
                 connection=self.connection,
                 embedding_provider=self.embedding_provider,
@@ -184,14 +198,46 @@ class IngestionService:
         self._index_version(path=path, version_id=version.id)
 
     def _index_version(self, *, path: Path, version_id: str) -> None:
-        chunks = _parse_and_chunk(path=path, settings=self.settings)
+        prepared = _parse_and_chunk(path=path, settings=self.settings)
+        self._store_parsed_document_metadata(
+            version_id=version_id,
+            parsed=prepared.document,
+        )
         DocumentIndexer(
             connection=self.connection,
             embedding_provider=self.embedding_provider,
             vector_store=self._get_vector_store(),
             collection_name=self.settings.vector_collection_name,
             embedding_batch_size=self.settings.embedding_batch_size,
-        ).index_document_version(document_version_id=version_id, chunks=chunks)
+        ).index_document_version(document_version_id=version_id, chunks=prepared.chunks)
+
+    def _store_parsed_document_metadata(
+        self,
+        *,
+        version_id: str,
+        parsed: ParsedDocument,
+    ) -> None:
+        structure_tree = json.dumps(
+            [asdict(section) for section in parsed.document_structure_tree],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.connection.execute(
+            """
+            UPDATE document_versions
+            SET parser_version = ?, layout_version = ?, document_type = ?,
+                document_structure_tree = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                parsed.parser_version,
+                parsed.layout_version,
+                parsed.document_type,
+                structure_tree,
+                version_id,
+            ),
+        )
+        self.connection.commit()
 
     def close(self) -> None:
         self._vector_store = None
@@ -260,17 +306,21 @@ class IngestionService:
         self.connection.commit()
 
 
-def _parse_and_chunk(*, path: Path, settings: Settings) -> tuple:
+def _parse_and_chunk(*, path: Path, settings: Settings) -> ParsedChunks:
+    background_work_gate.wait_for_background_work()
     parsed = parse_document(
         path,
         ocr_enabled=settings.ocr_enabled,
         ocr_min_text_chars_per_page=settings.ocr_min_text_chars_per_page,
         ocr_render_dpi=settings.ocr_render_dpi,
+        pdf_extract_images=settings.pdf_extract_images,
+        pdf_image_output_dir=settings.pdf_image_output_path,
         archive_max_members=settings.archive_max_members,
         archive_max_member_bytes=settings.archive_max_member_bytes,
         archive_max_uncompressed_bytes=settings.archive_max_uncompressed_bytes,
         archive_max_compression_ratio=settings.archive_max_compression_ratio,
     )
+    background_work_gate.wait_for_background_work()
     chunks = StructureAwareChunker(
         target_tokens=settings.chunk_size_tokens,
         overlap_tokens=settings.chunk_overlap_tokens,
@@ -279,7 +329,7 @@ def _parse_and_chunk(*, path: Path, settings: Settings) -> tuple:
     ).chunk(parsed)
     if not chunks:
         raise ValueError("no indexable text was extracted from the document")
-    return chunks
+    return ParsedChunks(document=parsed, chunks=chunks)
 
 
 def prepare_ingestion_job(*, job: Job, settings: Settings) -> PreparedIngestion:
@@ -306,10 +356,13 @@ def prepare_ingestion_job(*, job: Job, settings: Settings) -> PreparedIngestion:
             raise ValueError("document version is missing")
         if job.expected_sha256 is not None and version.sha256 != job.expected_sha256:
             raise ValueError("stale job fingerprint does not match the document version")
+        with lower_current_thread_priority():
+            prepared = _parse_and_chunk(path=path, settings=settings)
         return PreparedIngestion(
             job=job,
             document_version_id=version.id,
-            chunks=_parse_and_chunk(path=path, settings=settings),
+            parsed_document=prepared.document,
+            chunks=prepared.chunks,
         )
 
 

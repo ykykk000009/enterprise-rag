@@ -97,7 +97,9 @@
     main { width: min(100%, 1600px); margin: 0 auto; padding: 18px 48px 48px; }
     .workspace-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(460px, 1fr); gap: 16px; }
     .panel { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); padding: 20px; }
-    .panel + .panel, .workspace-grid + .panel { margin-top: 16px; }
+    /* Only vertically stacked top-level panels need separation.  Applying this
+       to every adjacent panel also offsets the second card inside the grid. */
+    main > .panel + .panel, .workspace-grid + .panel { margin-top: 16px; }
     .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
     .panel-heading h2 { margin: 0; font-size: 17px; font-weight: 800; letter-spacing: 0; }
     .panel-heading h2 .heading-symbol { margin-right: 8px; color: var(--blue); font-size: 20px; vertical-align: -1px; }

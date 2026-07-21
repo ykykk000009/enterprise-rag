@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import Settings
 from .db import sqlite_connection
-from .operations import IngestionService, PreparedIngestion, prepare_ingestion_job
+from .operations import IngestionService, prepare_ingestion_job
 from .repositories import JobRepository
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionWorker:
@@ -39,11 +42,26 @@ class IngestionWorker:
         self._parser_pool.shutdown(wait=True, cancel_futures=True)
 
     def _run(self) -> None:
+        leases_recovered = False
         while not self._stop_event.is_set():
-            worked = self._process_one_job()
+            try:
+                if not leases_recovered:
+                    self._recover_stale_leases()
+                    leases_recovered = True
+                worked = self._process_one_job()
+            except Exception:
+                logger.exception("ingestion worker iteration failed; retrying")
+                self._wake_event.wait(timeout=2)
+                self._wake_event.clear()
+                continue
             if not worked:
                 self._wake_event.wait(timeout=2)
                 self._wake_event.clear()
+
+    def _recover_stale_leases(self) -> int:
+        """Return jobs abandoned by a previous worker process to the queue."""
+        with sqlite_connection(self.settings) as connection:
+            return JobRepository(connection).release_leases()
 
     def _process_one_job(self) -> bool:
         with sqlite_connection(self.settings) as connection:
@@ -64,25 +82,21 @@ class IngestionWorker:
                 for job in runnable[: self.settings.ingestion_batch_size]
             ]
 
-        prepared: list[PreparedIngestion] = []
-        failures: list[tuple] = []
         futures = {
             self._parser_pool.submit(prepare_ingestion_job, job=job, settings=self.settings): job
             for job in leased
         }
-        for future in as_completed(futures):
-            job = futures[future]
-            try:
-                prepared.append(future.result())
-            except Exception as exc:
-                failures.append((job, _safe_error(exc)))
-
         with sqlite_connection(self.settings) as connection:
             service = IngestionService(connection=connection, settings=self.settings)
             try:
-                service.write_prepared_jobs(prepared)
-                for job, error in failures:
-                    service.fail_prepared_job(job=job, error=error)
+                for future in as_completed(futures):
+                    job = futures[future]
+                    try:
+                        prepared = future.result()
+                    except Exception as exc:
+                        service.fail_prepared_job(job=job, error=_safe_error(exc))
+                        continue
+                    service.write_prepared_jobs([prepared])
             finally:
                 service.close()
         return True

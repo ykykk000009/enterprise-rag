@@ -24,6 +24,16 @@ class SearchResult:
     bbox: tuple[float, float, float, float] | None
     score: float
     sources: frozenset[str] = field(default_factory=frozenset)
+    page_range: tuple[int, int] | None = None
+    bbox_list: tuple[tuple[float, float, float, float], ...] = ()
+    content_type: str = "text"
+    source_type: str = "native_text"
+    ocr_confidence: float | None = None
+    block_types: tuple[str, ...] = ()
+    table_markdown: str | None = None
+    image_path: str | None = None
+    caption: str | None = None
+    image_metadata: dict[str, object] | None = None
 
 
 class _QueryVectorCache:
@@ -170,6 +180,22 @@ class HybridRetriever:
                     bbox=_parse_bbox(row["bbox"]),
                     score=rank_scores[chunk_id],
                     sources=frozenset(sources.get(chunk_id, set())),
+                    page_range=_parse_page_range(row["page_range"]),
+                    bbox_list=_parse_bbox_list(row["bbox_list"]),
+                    content_type=str(row["content_type"]),
+                    source_type=str(row["source_type"]),
+                    ocr_confidence=(
+                        float(row["ocr_confidence"])
+                        if row["ocr_confidence"] is not None
+                        else None
+                    ),
+                    block_types=tuple(json.loads(row["block_types"] or "[]")),
+                    table_markdown=row["table_markdown"],
+                    image_path=row["image_path"],
+                    caption=row["caption"],
+                    image_metadata=json.loads(row["image_metadata"])
+                    if row["image_metadata"]
+                    else None,
                 )
             )
         return results
@@ -187,6 +213,7 @@ class HybridRetriever:
             return {
                 chunk_id: fused_scores[chunk_id]
                 + _lexical_overlap_score(query, by_id[chunk_id]["text"])
+                + _structure_relevance_bonus(query, by_id[chunk_id])
                 for chunk_id in available_ids
             }
         rerank_scores = self.reranker.score(
@@ -201,6 +228,7 @@ class HybridRetriever:
                 + fused_scores[chunk_id] * 0.01
                 + _exact_field_bonus(query, by_id[chunk_id]["text"])
                 + _table_total_bonus(query, by_id[chunk_id]["text"])
+                + _structure_relevance_bonus(query, by_id[chunk_id])
             )
             for chunk_id, rerank_score in zip(available_ids, rerank_scores, strict=True)
         }
@@ -300,6 +328,11 @@ class HybridRetriever:
         for term in terms:
             pattern = _like_pattern(term)
             score_params.extend((pattern, pattern, float(len(term))))
+        table_priority = (
+            " + CASE WHEN chunks.content_type = 'table' THEN 100 ELSE 0 END"
+            if _is_table_operation_query(query)
+            else ""
+        )
         params: list[object] = [*score_params, knowledge_base_id, *match_params]
         acl_clause = ""
         if allowed_document_ids is not None:
@@ -309,7 +342,8 @@ class HybridRetriever:
         params.append(self.fts_top_k)
         rows = self.connection.execute(
             f"""
-            SELECT chunks.id AS chunk_id, ({' + '.join(score_clauses)}) AS exact_score
+            SELECT chunks.id AS chunk_id,
+                ({' + '.join(score_clauses)}{table_priority}) AS exact_score
             FROM chunks
             JOIN chunks_fts ON chunks_fts.chunk_id = chunks.id
             JOIN document_versions ON document_versions.id = chunks.document_version_id
@@ -418,8 +452,18 @@ class HybridRetriever:
                 chunks.id AS chunk_id,
                 chunks.text,
                 chunks.page_no,
+                chunks.page_range,
                 chunks.section_path,
                 chunks.bbox,
+                chunks.bbox_list,
+                chunks.content_type,
+                chunks.source_type,
+                chunks.ocr_confidence,
+                chunks.block_types,
+                chunks.table_markdown,
+                chunks.image_path,
+                chunks.caption,
+                chunks.image_metadata,
                 documents.id AS document_id,
                 documents.canonical_path
             FROM chunks
@@ -443,6 +487,30 @@ def _parse_bbox(value: str | None) -> tuple[float, float, float, float] | None:
     return tuple(float(item) for item in loaded)
 
 
+def _parse_page_range(value: str | None) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    loaded = json.loads(value)
+    if not isinstance(loaded, list) or len(loaded) != 2:
+        return None
+    return (int(loaded[0]), int(loaded[1]))
+
+
+def _parse_bbox_list(
+    value: str | None,
+) -> tuple[tuple[float, float, float, float], ...]:
+    if value is None:
+        return ()
+    loaded = json.loads(value)
+    if not isinstance(loaded, list):
+        return ()
+    boxes = []
+    for item in loaded:
+        if isinstance(item, list) and len(item) == 4:
+            boxes.append(tuple(float(coordinate) for coordinate in item))
+    return tuple(boxes)
+
+
 def _fts_query(query: str) -> str:
     terms = _fts_terms(query)
     if not terms:
@@ -455,6 +523,8 @@ def _fts_terms(query: str) -> list[str]:
     if quoted:
         return quoted
     terms: list[str] = []
+    terms.extend(_mixed_identifier_terms(query))
+    terms.extend(_table_operation_terms(query))
     for token in re.findall(r"[A-Za-z0-9_]+", query):
         if len(token) >= 2:
             terms.append(token)
@@ -472,6 +542,13 @@ def _contains_terms(query: str) -> list[tuple[str, float]]:
 
     for phrase in _quoted_phrases(query):
         add(phrase, 100.0)
+
+    for identifier in _mixed_identifier_terms(query):
+        # A label such as 产品B / 型号A1 identifies a row far more precisely
+        # than the surrounding natural-language question.
+        add(identifier, 80.0)
+    for table_term in _table_operation_terms(query):
+        add(table_term, 60.0)
 
     for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", query):
         if len(token) >= 2:
@@ -496,6 +573,11 @@ def _exact_terms(query: str) -> list[str]:
 
     for phrase in _quoted_phrases(query):
         add(phrase)
+    for identifier in _mixed_identifier_terms(query):
+        add(identifier)
+    for table_term in _table_operation_terms(query):
+        if table_term not in terms:
+            terms.append(table_term)
     for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", query):
         add(token)
     question_words = re.compile(
@@ -508,6 +590,45 @@ def _exact_terms(query: str) -> list[str]:
         for part in re.split(r"[\u7684\u4e2d\u91cc\u4e0e\u53ca\u5bf9\u4e8e]", cleaned):
             add(part)
     return terms[:8]
+
+
+def _mixed_identifier_terms(query: str) -> list[str]:
+    """Keep labels such as 产品B and 型号A1 intact during Chinese tokenization."""
+    matches = re.findall(
+        r"(?:[\u4e00-\u9fff]+[A-Za-z0-9]+|[A-Za-z0-9]+[\u4e00-\u9fff]+)",
+        query,
+    )
+    return list(dict.fromkeys(item for item in matches if len(item) >= 3))
+
+
+def _table_operation_terms(query: str) -> list[str]:
+    """Extract a short table field immediately before a numeric-operation word."""
+    values: list[str] = []
+    pattern = re.compile(r"([\u4e00-\u9fff]{2,}?)(?:数量|销量|金额|价格|最高|最大|最低|最小)")
+    for match in pattern.finditer(query):
+        candidate = match.group(1).split("的")[-1]
+        if len(candidate) >= 2:
+            values.append(candidate[-2:])
+    return list(dict.fromkeys(values))
+
+
+def _is_table_operation_query(query: str) -> bool:
+    normalized = re.sub(r"\s+", "", query)
+    return bool(_table_operation_terms(query)) and any(
+        marker in normalized
+        for marker in (
+            "数量",
+            "销量",
+            "金额",
+            "价格",
+            "合计",
+            "总和",
+            "最高",
+            "最大",
+            "最低",
+            "最小",
+        )
+    )
 
 
 def _quoted_phrases(query: str) -> list[str]:
@@ -594,6 +715,42 @@ def _table_total_bonus(query: str, text: str) -> float:
     if "医院总价：" in normalized:
         score += 5.0
     return score
+
+
+def _structure_relevance_bonus(query: str, row: sqlite3.Row) -> float:
+    bonus = 0.0
+    section_path = str(row["section_path"] or "")
+    if section_path:
+        bonus += min(_lexical_overlap_score(query, section_path), 1.5)
+    content_type = str(row["content_type"] or "text")
+    normalized = query.casefold()
+    table_operation_markers = (
+        "数量",
+        "销量",
+        "金额",
+        "价格",
+        "合计",
+        "总和",
+        "最高",
+        "最大",
+        "最低",
+        "最小",
+    )
+    if content_type == "table" and any(marker in normalized for marker in table_operation_markers):
+        # A table is the primary evidence for a direct lookup or calculation;
+        # prose mentioning the same business term should not outrank it.
+        bonus += 20.0
+    if content_type == "table" and any(
+        marker in normalized
+        for marker in ("表", "表格", "型号", "参数", "合计", "总计", "table", "total")
+    ):
+        bonus += 2.0
+    if content_type == "image" and any(
+        marker in normalized
+        for marker in ("图", "流程图", "架构", "曲线", "figure", "diagram", "chart")
+    ):
+        bonus += 2.0
+    return bonus
 
 
 def _like_pattern(value: str) -> str:

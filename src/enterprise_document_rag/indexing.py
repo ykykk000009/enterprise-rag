@@ -260,8 +260,18 @@ class DocumentIndexer:
                     chunk.chunk_index,
                     chunk.text,
                     chunk.page_no,
+                    json.dumps(chunk.page_range) if chunk.page_range is not None else None,
                     " / ".join(chunk.section_path),
                     json.dumps(chunk.bbox) if chunk.bbox is not None else None,
+                    json.dumps(chunk.bbox_list),
+                    chunk.content_type,
+                    chunk.source_type,
+                    chunk.ocr_confidence,
+                    json.dumps(chunk.block_types),
+                    chunk.table_markdown,
+                    chunk.image_path,
+                    chunk.caption,
+                    json.dumps(chunk.image_metadata) if chunk.image_metadata is not None else None,
                     chunk.token_count,
                     chunk.text_hash,
                     previous_id,
@@ -272,10 +282,12 @@ class DocumentIndexer:
         self.connection.executemany(
             """
             INSERT INTO chunks (
-                id, document_version_id, chunk_index, text, page_no, section_path,
-                bbox, token_count, text_hash, previous_chunk_id, next_chunk_id
+                id, document_version_id, chunk_index, text, page_no, page_range,
+                section_path, bbox, bbox_list, content_type, source_type,
+                ocr_confidence, block_types, table_markdown, image_path, caption, image_metadata,
+                token_count, text_hash, previous_chunk_id, next_chunk_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             chunk_rows,
         )
@@ -316,6 +328,18 @@ class DocumentIndexer:
                             "knowledge_base_id": document.document["knowledge_base_id"],
                             "document_version_id": document.item.document_version_id,
                             "chunk_index": chunk.chunk_index,
+                            "page_range": list(chunk.page_range)
+                            if chunk.page_range is not None
+                            else None,
+                            "section_path": list(chunk.section_path),
+                            "bbox_list": [list(item) for item in chunk.bbox_list],
+                            "content_type": chunk.content_type,
+                            "source_type": chunk.source_type,
+                            "ocr_confidence": chunk.ocr_confidence,
+                            "table_markdown": chunk.table_markdown,
+                            "image_path": chunk.image_path,
+                            "caption": chunk.caption,
+                            "image_metadata": chunk.image_metadata,
                             "file_name": Path(document.document["canonical_path"]).name,
                             "canonical_path": str(document.document["canonical_path"]),
                         },

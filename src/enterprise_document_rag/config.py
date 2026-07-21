@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_min_text_chars_per_page: int = Field(default=40, ge=0)
     ocr_render_dpi: int = Field(default=150, ge=72, le=300)
+    pdf_extract_images: bool = True
+    pdf_image_output_dir: Path | None = None
     archive_max_members: int = Field(default=500, ge=1, le=10_000)
     archive_max_member_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
     archive_max_uncompressed_bytes: int = Field(default=200 * 1024 * 1024, ge=1)
@@ -90,6 +92,12 @@ class Settings(BaseSettings):
             return Path.cwd()
         resolved = database.expanduser().resolve()
         return resolved.parent.parent if resolved.parent.name.lower() == "data" else resolved.parent
+
+    @property
+    def pdf_image_output_path(self) -> Path:
+        if self.pdf_image_output_dir is not None:
+            return self.pdf_image_output_dir.expanduser().resolve()
+        return self.application_data_path / "pdf-images"
 
 
 @lru_cache

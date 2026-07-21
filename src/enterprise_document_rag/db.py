@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS document_versions (
     mtime_ns INTEGER NOT NULL CHECK (mtime_ns >= 0),
     sha256 TEXT NOT NULL,
     parser_version TEXT NOT NULL,
+    layout_version TEXT,
+    document_type TEXT,
+    document_structure_tree TEXT NOT NULL DEFAULT '[]',
     state TEXT NOT NULL,
     error TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -62,8 +65,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
     text TEXT NOT NULL,
     page_no INTEGER,
+    page_range TEXT,
     section_path TEXT,
     bbox TEXT,
+    bbox_list TEXT NOT NULL DEFAULT '[]',
+    content_type TEXT NOT NULL DEFAULT 'text',
+    source_type TEXT NOT NULL DEFAULT 'native_text',
+    ocr_confidence REAL,
+    block_types TEXT NOT NULL DEFAULT '[]',
+    table_markdown TEXT,
+    image_path TEXT,
+    caption TEXT,
+    image_metadata TEXT,
     token_count INTEGER NOT NULL CHECK (token_count >= 0),
     text_hash TEXT NOT NULL,
     previous_chunk_id TEXT,
@@ -161,11 +174,43 @@ def initialize_sqlite(settings: Settings) -> None:
         connection.execute("PRAGMA journal_mode=WAL;")
         connection.execute("PRAGMA foreign_keys=ON;")
         connection.executescript(SCHEMA_SQL)
+        _upgrade_pdf_metadata_schema(connection)
         connection.execute(
             "INSERT OR REPLACE INTO app_metadata (key, value) VALUES (?, ?)",
-            ("schema_version", "t05"),
+            ("schema_version", "pdf-intelligence-v1"),
         )
         connection.commit()
+
+
+def _upgrade_pdf_metadata_schema(connection: sqlite3.Connection) -> None:
+    """Add PDF intelligence metadata to databases created by older releases."""
+    additions = {
+        "document_versions": {
+            "layout_version": "TEXT",
+            "document_type": "TEXT",
+            "document_structure_tree": "TEXT NOT NULL DEFAULT '[]'",
+        },
+        "chunks": {
+            "page_range": "TEXT",
+            "bbox_list": "TEXT NOT NULL DEFAULT '[]'",
+            "content_type": "TEXT NOT NULL DEFAULT 'text'",
+            "source_type": "TEXT NOT NULL DEFAULT 'native_text'",
+            "ocr_confidence": "REAL",
+            "block_types": "TEXT NOT NULL DEFAULT '[]'",
+            "table_markdown": "TEXT",
+            "image_path": "TEXT",
+            "caption": "TEXT",
+            "image_metadata": "TEXT",
+        },
+    }
+    for table, columns in additions.items():
+        existing = {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column, definition in columns.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 @contextmanager

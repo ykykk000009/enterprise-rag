@@ -24,6 +24,12 @@ $env:TEMP = $PackageTemp
 $env:TMP = $PackageTemp
 $env:PYINSTALLER_CONFIG_DIR = $PyInstallerCache
 
+function Assert-LastExitCode([string]$Step) {
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Step failed with exit code $LASTEXITCODE"
+    }
+}
+
 $ExistingUserData = Join-Path $AppDir "user-data"
 if (Test-Path $ExistingUserData) {
     throw "user-data exists in the dist build directory. Back it up or move it to a separate installation before packaging."
@@ -37,8 +43,11 @@ if (-not (Test-Path $Python)) {
 }
 
 & $Python -m pip install --upgrade pip
+Assert-LastExitCode "pip upgrade"
 & $Python -m pip install ".[dev]" pyinstaller
+Assert-LastExitCode "dependency installation"
 & $Python -m pytest
+Assert-LastExitCode "test suite"
 
 & $Python -m PyInstaller `
     --noconfirm `
@@ -51,6 +60,7 @@ if (-not (Test-Path $Python)) {
     --workpath (Join-Path $ProjectRoot "build\updater") `
     --specpath (Join-Path $ProjectRoot "build") `
     updater.py
+Assert-LastExitCode "Updater build"
 
 & $Python -m PyInstaller `
     --noconfirm `
@@ -70,6 +80,7 @@ if (-not (Test-Path $Python)) {
     --collect-all qdrant_client `
     --collect-submodules onnxruntime `
     windows_launcher.py
+Assert-LastExitCode "DocQA build"
 
 Copy-Item (Join-Path $PSScriptRoot "QUICK_START.txt") (Join-Path $AppDir "QUICK_START.txt") -Force
 Copy-Item (Join-Path $PSScriptRoot "portable.mode") $AppDir -Force
@@ -81,7 +92,7 @@ Copy-Item $IconPath (Join-Path $AppDir "docqa.ico") -Force
 
 $InternalRoot = Join-Path $AppDir "_internal"
 $BundledTestDirectories = Get-ChildItem -LiteralPath $InternalRoot -Recurse -Directory |
-    Where-Object { $_.Name.ToLowerInvariant() -in @("test", "tests") } |
+    Where-Object { $_.Name.ToLowerInvariant() -in @("test", "tests", "testing") } |
     Sort-Object { $_.FullName.Length } -Descending
 foreach ($Directory in $BundledTestDirectories) {
     Remove-Item -LiteralPath $Directory.FullName -Recurse -Force

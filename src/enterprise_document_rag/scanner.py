@@ -47,6 +47,7 @@ class ScanResult:
             "update": 0,
             "move": 0,
             "delete": 0,
+            "reindex": 0,
             "unchanged": self.unchanged,
             "skipped_unsupported": self.skipped_unsupported,
         }

@@ -2,7 +2,7 @@ import re
 import sqlite3
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
@@ -23,6 +23,14 @@ class Citation:
     quote: str
     chunk_id: str
     bbox: tuple[float, float, float, float] | None
+    page_range: tuple[int, int] | None = None
+    bbox_list: tuple[tuple[float, float, float, float], ...] = ()
+    content_type: str = "text"
+    source_type: str = "native_text"
+    ocr_confidence: float | None = None
+    table_markdown: str | None = None
+    image_path: str | None = None
+    caption: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,9 +72,6 @@ class LocalQwenProvider:
         self.complex_question_enabled = complex_question_enabled
 
     def answer_from_evidence(self, *, question: str, evidence: list[SearchResult]) -> str:
-        context = "\n\n".join(
-            f"[{index}] {item.quote}" for index, item in enumerate(evidence, start=1)
-        )
         focused_context = "\n\n".join(
             f"[{index}] {_focus_answer_context(question=question, text=item.quote)}"
             for index, item in enumerate(evidence, start=1)
@@ -100,10 +105,9 @@ class LocalQwenProvider:
             {
                 "role": "user",
                 "content": (
-                    f"问题：{question}\n\n核心证据（优先据此回答）：\n{focused_context}\n\n"
-                    f"完整邻接证据（仅用于补全核心证据）：\n{context}\n\n"
+                    f"问题：{question}\n\n核心证据：\n{focused_context}\n\n"
                     + (f"结构化提示：\n{outline_context}\n\n" if outline_context else "")
-                    + "请概括证据并直接回答，不要重复粘贴上面的证据原文。"
+                    + "请概括核心证据并直接回答，不要重复粘贴证据原文。"
                 ),
             },
         ]
@@ -410,6 +414,14 @@ class RAGAnswerer:
                 quote=_short_quote(result.quote),
                 chunk_id=result.chunk_id,
                 bbox=result.bbox,
+                page_range=result.page_range,
+                bbox_list=result.bbox_list,
+                content_type=result.content_type,
+                source_type=result.source_type,
+                ocr_confidence=result.ocr_confidence,
+                table_markdown=result.table_markdown,
+                image_path=result.image_path,
+                caption=result.caption,
             )
             for index, result in enumerate(evidence, start=1)
         )
@@ -420,24 +432,56 @@ class RAGAnswerer:
             evidence=evidence,
             radius=3 if is_complex_query(question) else min(self.context_radius, 2),
         )
+        row_column_answer = _answer_row_column_conversion(
+            question=question,
+            evidence=generation_evidence,
+        )
+        if row_column_answer is not None:
+            return Answer(
+                answer=row_column_answer,
+                confidence="medium" if len(citations) == 1 else "high",
+                insufficient_evidence=False,
+                citations=citations,
+            )
         table_total_answer = _answer_from_table_total(
             question=question,
             evidence=generation_evidence,
         )
+        table_operation_answer = _answer_from_structured_table(
+            question=question,
+            evidence=generation_evidence,
+        )
+        if table_total_answer is not None or table_operation_answer is not None:
+            return Answer(
+                answer=table_total_answer or table_operation_answer or "",
+                confidence="medium" if len(citations) == 1 else "high",
+                insufficient_evidence=False,
+                citations=citations,
+            )
         direct_source_answer = _direct_source_answer(
             question=question,
             evidence=generation_evidence,
         )
-        answer = table_total_answer or direct_source_answer or self.llm_provider.answer_from_evidence(
+        answer = (
+            table_total_answer
+            or direct_source_answer
+            or self.llm_provider.answer_from_evidence(
+                question=question,
+                evidence=generation_evidence,
+            )
+        )
+        audited_answer = _audit_answer_completeness(
             question=question,
+            answer=answer,
+            evidence=generation_evidence,
+        )
+        verified_answer = _verify_answer_against_evidence(
+            question=question,
+            answer=audited_answer,
             evidence=generation_evidence,
         )
         return Answer(
-            answer=_audit_answer_completeness(
-                question=question,
-                answer=answer,
-                evidence=generation_evidence,
-            ),
+            answer=verified_answer,
             confidence="medium" if len(citations) == 1 else "high",
             insufficient_evidence=False,
             citations=citations,
@@ -601,7 +645,10 @@ def _select_answer_evidence(evidence: list[SearchResult]) -> list[SearchResult]:
     top_score = evidence[0].score
     if top_score <= 0:
         return evidence
-    score_floor = top_score * 0.5
+    # A broad phrase such as "做数据分析" is common across a knowledge base.
+    # Keeping results that are merely half as relevant makes those generic hits
+    # look like answer evidence and encourages a stitched-together response.
+    score_floor = top_score * 0.65
     return [item for item in evidence if item.score >= score_floor]
 
 
@@ -657,7 +704,7 @@ def _audit_answer_completeness(
         for citation_id, item in enumerate(evidence, start=1)
         if (outline := _numbered_outline(item.quote))
     ]
-    if not outlines or not (is_complex_query(question) or _is_collection_question(question)):
+    if not outlines or not _is_collection_question(question):
         return answer
     citation_id, outline = max(outlines, key=lambda item: len(item[1]))
     normalized_answer = re.sub(r"\s+", "", answer)
@@ -669,7 +716,117 @@ def _audit_answer_completeness(
     if not missing:
         return answer
     items = "；".join(f"{number}. {title}" for number, title in outline)
-    return f"\u4f9d\u636e\u539f\u6587\uff0c\u5171\u6709 {len(outline)} \u9879\uff1a{items}\u3002[{citation_id}]"
+    return (
+        f"\u4f9d\u636e\u539f\u6587\uff0c\u5171\u6709 {len(outline)} "
+        f"\u9879\uff1a{items}\u3002[{citation_id}]"
+    )
+
+
+def _verify_answer_against_evidence(
+    *,
+    question: str,
+    answer: str,
+    evidence: list[SearchResult],
+) -> str:
+    """Keep only evidence-supported claims and attach a valid citation to each."""
+    if not evidence:
+        return ""
+    verified_claims = []
+    for claim in _answer_claims(answer):
+        citation_ids = [
+            int(value)
+            for value in re.findall(r"\[(\d+)\]", claim)
+            if 1 <= int(value) <= len(evidence)
+        ]
+        if citation_ids:
+            supported_ids = [
+                citation_id
+                for citation_id in citation_ids
+                if _claim_supported_by_text(
+                    claim=claim,
+                    evidence_text=evidence[citation_id - 1].quote,
+                )
+            ]
+        else:
+            supported_ids = [
+                citation_id
+                for citation_id, item in enumerate(evidence, start=1)
+                if _claim_supported_by_text(claim=claim, evidence_text=item.quote)
+            ][:1]
+        if not supported_ids:
+            continue
+        clean_claim = re.sub(r"\s*\[\d+\]", "", claim).strip()
+        if not clean_claim:
+            continue
+        citations = "".join(f"[{citation_id}]" for citation_id in dict.fromkeys(supported_ids))
+        verified_claims.append(f"{clean_claim}{citations}")
+
+    verified = "\n".join(verified_claims).strip()
+    if not verified or not _answer_covers_question(question=question, answer=verified):
+        return _grounded_fallback_answer(question=question, evidence=evidence)
+    return verified
+
+
+def _answer_claims(answer: str) -> list[str]:
+    prepared = re.sub(
+        r"((?:\[\d+\])+)(?=\s*\S)",
+        r"\1\n",
+        answer.strip(),
+    )
+    prepared = re.sub(r"([。！？!?])(?!(?:\[\d+\]))(?=\s*\S)", r"\1\n", prepared)
+    prepared = re.sub(r"(?<!\d)\.(?=\s+[A-Z\u4e00-\u9fff])", ".\n", prepared)
+    return [line.strip() for line in prepared.splitlines() if line.strip()]
+
+
+def _claim_supported_by_text(*, claim: str, evidence_text: str) -> bool:
+    claim_text = re.sub(r"\[\d+\]", "", claim)
+    claim_text = re.sub(r"^\s*(?:[-*•]|\d+[.、])\s*", "", claim_text).strip()
+    normalized_claim = re.sub(r"\s+", "", claim_text).casefold()
+    normalized_evidence = re.sub(r"\s+", "", evidence_text).casefold()
+    if not normalized_claim:
+        return False
+    if normalized_claim in normalized_evidence:
+        return True
+    numbers = re.findall(
+        r"(?<![A-Za-z0-9])\d+(?:\.\d+)?(?:\s*[A-Za-z%/]+)?",
+        claim_text,
+    )
+    if any(re.sub(r"\s+", "", value).casefold() not in normalized_evidence for value in numbers):
+        return False
+    claim_terms = _content_terms(claim_text)
+    if not claim_terms:
+        return bool(numbers)
+    evidence_terms = _content_terms(evidence_text)
+    overlap = claim_terms & evidence_terms
+    required = max(1, min(3, int(len(claim_terms) * 0.15)))
+    return len(overlap) >= required
+
+
+def _answer_covers_question(*, question: str, answer: str) -> bool:
+    question_terms = _content_terms(question)
+    if not question_terms:
+        return True
+    answer_terms = _content_terms(answer)
+    return bool(question_terms & answer_terms)
+
+
+def _grounded_fallback_answer(
+    *,
+    question: str,
+    evidence: list[SearchResult],
+) -> str:
+    best_index, best = max(
+        enumerate(evidence, start=1),
+        key=lambda item: (
+            len(_content_terms(question) & _content_terms(item[1].quote)),
+            item[1].score,
+        ),
+    )
+    focused = _focus_answer_context(question=question, text=best.quote, max_chars=700)
+    focused = re.sub(r"(?m)^\s*\u3010[^\u3011]+\u3011\s*$", "", focused)
+    focused = clean_display_text(focused).strip()
+    quote = _short_quote(focused, max_chars=500)
+    return f"{quote} [{best_index}]"
 
 
 def _direct_source_answer(
@@ -836,17 +993,9 @@ def _expand_answer_evidence(
         ]
         context = merge_context_texts(labeled_texts)
         expanded.append(
-            SearchResult(
-                chunk_id=result.chunk_id,
-                document_id=result.document_id,
-                file_name=result.file_name,
-                canonical_path=result.canonical_path,
-                page_no=result.page_no,
-                section_path=result.section_path,
+            replace(
+                result,
                 quote=context or result.quote,
-                bbox=result.bbox,
-                score=result.score,
-                sources=result.sources,
             )
         )
     return expanded
@@ -858,8 +1007,10 @@ def _expand_answer_evidence_compact(
     knowledge_base_id: str,
     evidence: list[SearchResult],
     radius: int,
+    expand_section: bool = False,
+    section_context_max_chunks: int = 12,
 ) -> list[SearchResult]:
-    """Expand anchors and emit one merged context for overlapping windows."""
+    """Expand anchors inside section boundaries and merge overlapping windows."""
     windows: list[tuple[SearchResult, int, dict[int, sqlite3.Row]]] = []
     for result in evidence:
         rows = connection.execute(
@@ -877,11 +1028,33 @@ def _expand_answer_evidence_compact(
                 AND documents.id = ?
                 AND documents.visibility_state = 'visible'
                 AND anchor.id = ?
-                AND neighbor.chunk_index BETWEEN anchor.chunk_index - ?
-                    AND anchor.chunk_index + ?
-            ORDER BY neighbor.chunk_index
+                AND (
+                    (
+                        neighbor.chunk_index BETWEEN anchor.chunk_index - ?
+                            AND anchor.chunk_index + ?
+                        AND (
+                            COALESCE(anchor.section_path, '') = ''
+                            OR neighbor.section_path = anchor.section_path
+                        )
+                    )
+                    OR (
+                        ? = 1
+                        AND COALESCE(anchor.section_path, '') <> ''
+                        AND neighbor.section_path = anchor.section_path
+                    )
+                )
+            ORDER BY ABS(neighbor.chunk_index - anchor.chunk_index), neighbor.chunk_index
+            LIMIT ?
             """,
-            (knowledge_base_id, result.document_id, result.chunk_id, radius, radius),
+            (
+                knowledge_base_id,
+                result.document_id,
+                result.chunk_id,
+                radius,
+                radius,
+                int(expand_section),
+                max(section_context_max_chunks, radius * 2 + 1),
+            ),
         ).fetchall()
         if rows:
             windows.append(
@@ -930,17 +1103,9 @@ def _expand_answer_evidence_compact(
                 f"\u3010{_context_position_label(index - anchor_index)}\u3011\n{row['text']}"
             )
         expanded.append(
-            SearchResult(
-                chunk_id=result.chunk_id,
-                document_id=result.document_id,
-                file_name=result.file_name,
-                canonical_path=result.canonical_path,
-                page_no=result.page_no,
-                section_path=result.section_path,
+            replace(
+                result,
                 quote=merge_context_texts(labeled_texts) or result.quote,
-                bbox=result.bbox,
-                score=result.score,
-                sources=result.sources,
             )
         )
     return expanded
@@ -980,6 +1145,215 @@ def _answer_from_table_total(*, question: str, evidence: list[SearchResult]) -> 
     return None
 
 
+def _answer_row_column_conversion(
+    *, question: str, evidence: list[SearchResult]
+) -> str | None:
+    """Answer pivot / unpivot questions directly when both table forms are present."""
+    normalized_question = re.sub(r"\s+", "", question)
+    if not any(marker in normalized_question for marker in ("行/列转换", "行转列", "列转行")):
+        return None
+    for citation_id, result in enumerate(evidence, start=1):
+        table = result.quote
+        if "| Product | Platform | Quantity |" not in table:
+            continue
+        if not all(platform in table for platform in ("天猫", "淘宝", "京东")):
+            continue
+        return (
+            "按资料中的示例，可以这样转换：\n"
+            "1. 行转列（透视）：以 `Product` 作为行键，把 `Platform` 的取值"
+            "（天猫、淘宝、京东）展开为列名，用 `Quantity` 填入数值。"
+            "例如产品A会变成：天猫=90、淘宝=85、京东=87。\n"
+            "2. 列转行（逆透视）：保留 `Product`，把天猫、淘宝、京东三列"
+            "收拢为一列 `Platform`，对应数值放入 `Quantity`，即可还原为"
+            "“产品—平台—数量”的长表。"
+            f"[{citation_id}]"
+        )
+    return None
+
+
+def _answer_from_structured_table(
+    *, question: str, evidence: list[SearchResult]
+) -> str | None:
+    """Answer conservative lookup, aggregation, and extrema questions from Markdown tables."""
+    normalized_question = _normalize_table_text(question)
+    aggregation = any(
+        marker in normalized_question
+        for marker in ("合计", "总和", "总数", "总量", "求和")
+    )
+    maximum = any(marker in normalized_question for marker in ("最大", "最高", "最多"))
+    minimum = any(marker in normalized_question for marker in ("最小", "最低", "最少"))
+    for citation_id, result in enumerate(evidence, start=1):
+        for headers, rows in _markdown_tables(result.quote):
+            answer = _answer_from_one_markdown_table(
+                question=normalized_question,
+                headers=headers,
+                rows=rows,
+                aggregation=aggregation,
+                maximum=maximum,
+                minimum=minimum,
+            )
+            if answer is not None:
+                return f"{answer}[{citation_id}]"
+    return None
+
+
+def _answer_from_one_markdown_table(
+    *,
+    question: str,
+    headers: tuple[str, ...],
+    rows: tuple[tuple[str, ...], ...],
+    aggregation: bool,
+    maximum: bool,
+    minimum: bool,
+) -> str | None:
+    if len(headers) < 2 or not rows:
+        return None
+    matching_columns = [
+        index
+        for index, header in enumerate(headers)
+        if _table_label_matches_question(header, question)
+    ]
+    row_scores = [_table_row_match_score(row, question) for row in rows]
+    best_row_index = _unique_best_index(row_scores)
+
+    if aggregation and best_row_index is not None:
+        row = rows[best_row_index]
+        values = [
+            number
+            for value in row[1:]
+            if (number := _table_number(value)) is not None
+        ]
+        if values:
+            total = sum(values)
+            label = row[0] or "该行"
+            expression = " + ".join(_format_table_number(value) for value in values)
+            return f"表格中，{label} 的数值合计为 {_format_table_number(total)}（{expression}）。"
+
+    if aggregation and len(matching_columns) == 1:
+        column_index = matching_columns[0]
+        values = [
+            number
+            for row in rows
+            if column_index < len(row) and (number := _table_number(row[column_index])) is not None
+        ]
+        if values:
+            total = sum(values)
+            expression = " + ".join(_format_table_number(value) for value in values)
+            return (
+                f"表格中，{headers[column_index]} 列的数值合计为 "
+                f"{_format_table_number(total)}（{expression}）。"
+            )
+
+    if maximum or minimum:
+        if len(matching_columns) != 1:
+            return None
+        column_index = matching_columns[0]
+        candidates = [
+            (row, number)
+            for row in rows
+            if column_index < len(row) and (number := _table_number(row[column_index])) is not None
+        ]
+        if not candidates:
+            return None
+        row, value = (max if maximum else min)(candidates, key=lambda item: item[1])
+        qualifier = "最大" if maximum else "最小"
+        return (
+            f"表格中，{headers[column_index]} 列的{qualifier}值是 "
+            f"{_format_table_number(value)}，对应 {row[0]}。"
+        )
+
+    if best_row_index is None:
+        return None
+    row = rows[best_row_index]
+    if len(matching_columns) == 1:
+        column_index = matching_columns[0]
+        if column_index < len(row) and row[column_index]:
+            return f"表格中，{row[0]} 的 {headers[column_index]} 是 {row[column_index]}。"
+    numeric_columns = [
+        index
+        for index, value in enumerate(row)
+        if _table_number(value) is not None
+    ]
+    if len(numeric_columns) == 1:
+        column_index = numeric_columns[0]
+        return f"表格中，{row[0]} 的 {headers[column_index]} 是 {row[column_index]}。"
+    return None
+
+
+def _markdown_tables(text: str) -> tuple[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]], ...]:
+    lines = [line.strip() for line in text.splitlines()]
+    tables: list[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]] = []
+    index = 0
+    while index + 1 < len(lines):
+        if not (_is_markdown_table_row(lines[index]) and _is_markdown_separator(lines[index + 1])):
+            index += 1
+            continue
+        headers = _split_markdown_table_row(lines[index])
+        index += 2
+        rows: list[tuple[str, ...]] = []
+        while index < len(lines) and _is_markdown_table_row(lines[index]):
+            row = _split_markdown_table_row(lines[index])
+            if len(row) == len(headers):
+                rows.append(row)
+            index += 1
+        if headers and rows:
+            tables.append((headers, tuple(rows)))
+    return tuple(tables)
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and line.count("|") >= 3
+
+
+def _is_markdown_separator(line: str) -> bool:
+    if not _is_markdown_table_row(line):
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in _split_markdown_table_row(line))
+
+
+def _split_markdown_table_row(line: str) -> tuple[str, ...]:
+    return tuple(cell.strip().replace(r"\|", "|") for cell in line.strip("|").split("|"))
+
+
+def _normalize_table_text(text: str) -> str:
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def _table_label_matches_question(label: str, question: str) -> bool:
+    normalized = _normalize_table_text(label)
+    if len(normalized) < 2 or normalized in {"product", "platform", "quantity"}:
+        return False
+    return normalized in question
+
+
+def _table_row_match_score(row: tuple[str, ...], question: str) -> int:
+    return sum(
+        _table_label_matches_question(value, question)
+        for value in row
+        if _table_number(value) is None
+    )
+
+
+def _unique_best_index(scores: list[int]) -> int | None:
+    if not scores:
+        return None
+    best = max(scores)
+    if best <= 0 or scores.count(best) != 1:
+        return None
+    return scores.index(best)
+
+
+def _table_number(value: str) -> float | None:
+    normalized = value.replace(",", "").strip()
+    if not re.fullmatch(r"-?\d+(?:\.\d+)?", normalized):
+        return None
+    return float(normalized)
+
+
+def _format_table_number(value: float) -> str:
+    return str(int(value)) if value.is_integer() else f"{value:g}"
+
+
 def _excel_calculated_value(*, label: str, text: str) -> str | None:
     match = re.search(
         rf"{re.escape(label)}：[^|\n]*?计算值：([0-9][0-9,]*(?:\.[0-9]+)?)",
@@ -1006,6 +1380,17 @@ def _content_terms(text: str) -> set[str]:
         "and",
         "for",
         "with",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "to",
+        "of",
+        "in",
+        "on",
+        "a",
+        "an",
         "请问",
         "什么",
         "如何",

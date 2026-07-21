@@ -18,6 +18,14 @@ class OcrTextBlock:
 class OcrProvider(Protocol):
     def extract_page(self, *, page: pymupdf.Page, dpi: int) -> tuple[OcrTextBlock, ...]: ...
 
+    def extract_region(
+        self,
+        *,
+        page: pymupdf.Page,
+        bbox: tuple[float, float, float, float],
+        dpi: int,
+    ) -> tuple[OcrTextBlock, ...]: ...
+
     def extract_image(self, *, image_bytes: bytes) -> tuple[OcrTextBlock, ...]: ...
 
 
@@ -37,7 +45,36 @@ class RapidOcrProvider:
             pixmap.width,
             pixmap.n,
         )
-        return self._extract(image=image, coordinate_scale=scale)
+        return self._extract(image=image, coordinate_scale=scale, origin=(0.0, 0.0))
+
+    def extract_region(
+        self,
+        *,
+        page: pymupdf.Page,
+        bbox: tuple[float, float, float, float],
+        dpi: int,
+    ) -> tuple[OcrTextBlock, ...]:
+        import numpy as np
+
+        scale = dpi / 72
+        clip = pymupdf.Rect(bbox) & page.rect
+        if clip.is_empty:
+            return ()
+        pixmap = page.get_pixmap(
+            matrix=pymupdf.Matrix(scale, scale),
+            clip=clip,
+            alpha=False,
+        )
+        image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+            pixmap.height,
+            pixmap.width,
+            pixmap.n,
+        )
+        return self._extract(
+            image=image,
+            coordinate_scale=scale,
+            origin=(float(clip.x0), float(clip.y0)),
+        )
 
     def extract_image(self, *, image_bytes: bytes) -> tuple[OcrTextBlock, ...]:
         import cv2
@@ -46,9 +83,16 @@ class RapidOcrProvider:
         image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return ()
-        return self._extract(image=image, coordinate_scale=None)
+        # Image-local coordinates let document parsers reconstruct raster tables.
+        return self._extract(image=image, coordinate_scale=1.0, origin=(0.0, 0.0))
 
-    def _extract(self, *, image, coordinate_scale: float | None) -> tuple[OcrTextBlock, ...]:
+    def _extract(
+        self,
+        *,
+        image,
+        coordinate_scale: float | None,
+        origin: tuple[float, float] | None,
+    ) -> tuple[OcrTextBlock, ...]:
         from rapidocr_onnxruntime import RapidOCR
 
         if self._engine is None:
@@ -65,8 +109,9 @@ class RapidOcrProvider:
             if coordinate_scale is None:
                 bbox = None
             else:
-                xs = [point[0] / coordinate_scale for point in coordinates]
-                ys = [point[1] / coordinate_scale for point in coordinates]
+                origin_x, origin_y = origin or (0.0, 0.0)
+                xs = [point[0] / coordinate_scale + origin_x for point in coordinates]
+                ys = [point[1] / coordinate_scale + origin_y for point in coordinates]
                 bbox = (min(xs), min(ys), max(xs), max(ys))
             blocks.append(
                 OcrTextBlock(

@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
 from .config import Settings, configure_huggingface_cache, get_settings
@@ -25,9 +25,10 @@ from .repositories import (
     SourceRepository,
 )
 from .reranking import build_reranker
+from .resource_control import background_work_gate
 from .retrieval import HybridRetriever
 from .security import PathAuthorizationError, resolve_authorized_root
-from .text_utils import clean_display_text
+from .text_utils import clean_display_text, sanitize_unicode
 from .updates import UpdateError, UpdateService, launch_updater
 from .vector_store import (
     close_local_vector_store,
@@ -55,17 +56,34 @@ class SearchRequest(BaseModel):
     allowed_document_ids: list[str] | None = None
     top_k: int | None = Field(default=None, ge=1, le=50)
 
+    @field_validator("query", mode="before")
+    @classmethod
+    def sanitize_query(cls, value: object) -> object:
+        return sanitize_unicode(value) if isinstance(value, str) else value
+
 
 class QueryRequest(BaseModel):
     knowledge_base_id: str
     question: str = Field(min_length=1)
     allowed_document_ids: list[str] | None = None
 
+    @field_validator("question", mode="before")
+    @classmethod
+    def sanitize_question(cls, value: object) -> object:
+        return sanitize_unicode(value) if isinstance(value, str) else value
+
 
 class FieldSearchRequest(BaseModel):
     knowledge_base_id: str
     fields: list[str] = Field(min_length=1, max_length=50)
     mode: Literal["exact", "hybrid"] = "exact"
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def sanitize_fields(cls, values: object) -> object:
+        if not isinstance(values, list):
+            return values
+        return [sanitize_unicode(value) if isinstance(value, str) else value for value in values]
 
 
 class UpdateVersionRequest(BaseModel):
@@ -479,17 +497,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "\u8bf7\u7b49\u5f85\u9996\u6b21\u4e0b\u8f7d\u6216\u91cd\u8bd5"
                 ),
             )
-        with sqlite_connection(app_settings) as connection:
-            retriever = _retriever(connection=connection, settings=app_settings)
-            answer = RAGAnswerer(
-                connection=connection,
-                retriever=retriever,
-                llm_provider=app.state.llm_provider,
-            ).answer(
-                knowledge_base_id=request.knowledge_base_id,
-                question=request.question,
-                allowed_document_ids=_allowed_document_ids(request.allowed_document_ids),
-            )
+        background_work_gate.begin_interactive()
+        try:
+            with sqlite_connection(app_settings) as connection:
+                retriever = _retriever(connection=connection, settings=app_settings)
+                answer = RAGAnswerer(
+                    connection=connection,
+                    retriever=retriever,
+                    llm_provider=app.state.llm_provider,
+                ).answer(
+                    knowledge_base_id=request.knowledge_base_id,
+                    question=sanitize_unicode(request.question),
+                    allowed_document_ids=_allowed_document_ids(request.allowed_document_ids),
+                )
+        finally:
+            background_work_gate.end_interactive()
         return {
             "answer": answer.answer,
             "confidence": answer.confidence,
@@ -575,6 +597,7 @@ def _search_payload(result) -> dict[str, object]:
         "section_path": result.section_path,
         "quote": result.quote,
         "bbox": result.bbox,
+        "image_metadata": result.image_metadata,
         "score": result.score,
         "sources": sorted(result.sources),
     }
