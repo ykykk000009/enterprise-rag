@@ -51,8 +51,7 @@
 
 - 向量：`BAAI/bge-small-zh-v1.5`
 - 重排：`BAAI/bge-reranker-base`
-- 回答：`Qwen/Qwen3-0.6B`
-- 离线回答格式：官方 `Qwen3-0.6B`
+- 回答：`Qwen/Qwen3-0.6B`  
 
 完整实现和安全边界见 [技术架构与模型说明](docs/TECHNICAL_GUIDE.zh-CN.md)。
 
