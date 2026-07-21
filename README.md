@@ -11,14 +11,7 @@
 <img width="2505" height="1338" alt="image" src="https://github.com/user-attachments/assets/8a772ef4-de82-43c0-80f1-211e42d66b75" />  
 
 ## Windows 下载
-
-每个正式版本同时提供两个完整安装包：
-
-| 版本 | Release 文件 | 适合场景 |
-|---|---|---|
-| 标准在线版 | `DocQA-vX.Y.Z-win-x64.zip` | 包体较小；首次索引或问答时下载 BGE、Reranker 和 Qwen3，之后可离线使用 |
-| 离线完整版 | `DocQA-vX.Y.Z-win-x64-offline.zip` | 内置 BGE、INT8 Reranker、Qwen3 Q8 GGUF、llama.cpp 和 libarchive；解压后无需联网 |
-
+  
 从 [GitHub Releases](https://github.com/ykykk000009/DocQA-APP/releases/latest)
 下载对应 ZIP，完整解压后双击 `DocQA.exe`。
 
@@ -59,7 +52,7 @@
 - 向量：`BAAI/bge-small-zh-v1.5`
 - 重排：`BAAI/bge-reranker-base`
 - 回答：`Qwen/Qwen3-0.6B`
-- 离线回答格式：官方 `Qwen3-0.6B-Q8_0.gguf`，由 `llama.cpp` 在 CPU 上运行
+- 离线回答格式：官方 `Qwen3-0.6B`
 
 完整实现和安全边界见 [技术架构与模型说明](docs/TECHNICAL_GUIDE.zh-CN.md)。
 
